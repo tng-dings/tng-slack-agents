@@ -1,0 +1,23 @@
+<service>
+  <id>OpenCodeServer</id>
+  <name>OpenCode Headless Server</name>
+  <description>Authenticated localhost-only OpenCode HTTP service for the Slack agent runner.</description>
+  <executable>%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe</executable>
+  <arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BASE%\..\scripts\Start-OpenCode.ps1"</arguments>
+  <workingdirectory>%BASE%\..</workingdirectory>
+  <serviceaccount>
+    <username>NT AUTHORITY\LOCAL SERVICE</username>
+    <allowservicelogon>true</allowservicelogon>
+  </serviceaccount>
+  <startmode>Automatic</startmode>
+  <delayedAutoStart>true</delayedAutoStart>
+  <onfailure action="restart" delay="10 sec" />
+  <onfailure action="restart" delay="30 sec" />
+  <onfailure action="restart" delay="60 sec" />
+  <resetfailure>1 hour</resetfailure>
+  <stoptimeout>35 sec</stoptimeout>
+  <log mode="roll-by-size">
+    <sizeThreshold>10485760</sizeThreshold>
+    <keepFiles>5</keepFiles>
+  </log>
+</service>
