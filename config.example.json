@@ -1,0 +1,27 @@
+{
+  "slack": {
+    "enabled": true,
+    "allowedUserIds": ["U0123456789"],
+    "nativeStreaming": true
+  },
+  "openCode": {
+    "baseUrl": "http://127.0.0.1:4096",
+    "username": "opencode",
+    "workingRepository": "C:\\source\\your-repository"
+  },
+  "limits": {
+    "maxConcurrentJobsPerUser": 1,
+    "maxConcurrentJobsGlobal": 1,
+    "maxQueuedJobsPerUser": 3,
+    "jobTimeoutSeconds": 1800,
+    "dailyCostCap": 5
+  },
+  "storage": {
+    "databasePath": ".data/agent-runner.db",
+    "auditLogPath": ".data/audit.jsonl",
+    "worktreeRoot": ".data/worktrees"
+  },
+  "queue": {
+    "pollIntervalMs": 250
+  }
+}

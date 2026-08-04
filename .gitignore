@@ -1,0 +1,11 @@
+node_modules/
+dist/
+.data/
+config.json
+*.log
+*.db
+*.db-shm
+*.db-wal
+service/*.exe
+service/*.wrapper.log
+
