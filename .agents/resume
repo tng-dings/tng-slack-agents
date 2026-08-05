@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+node_home="$HOME/.local/node-v24.19.0"
+export PATH="$node_home/bin:$PATH"
+
+if [[ ! -x "$node_home/bin/node" ]]; then
+  echo "Node.js is missing; rerun .agents/setup." >&2
+  exit 1
+fi
+
+if [[ ! -d "$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)/node_modules" ]]; then
+  echo "npm dependencies are missing; rerun .agents/setup." >&2
+  exit 1
+fi
+
+echo "Orb ready (Node.js $(node --version))."

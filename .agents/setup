@@ -1,0 +1,51 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+node_version="24.19.0"
+node_home="$HOME/.local/node-v$node_version"
+
+case "$(uname -m)" in
+  x86_64) node_arch="x64" ;;
+  aarch64|arm64) node_arch="arm64" ;;
+  *)
+    echo "Unsupported architecture: $(uname -m)" >&2
+    exit 1
+    ;;
+esac
+
+if [[ ! -x "$node_home/bin/node" ]] || [[ "$($node_home/bin/node --version 2>/dev/null || true)" != "v$node_version" ]]; then
+  echo "Installing Node.js v$node_version..."
+  archive="node-v$node_version-linux-$node_arch.tar.xz"
+  temp_dir="$(mktemp -d)"
+  trap 'rm -rf "$temp_dir"' EXIT
+  curl --fail --location --silent --show-error \
+    "https://nodejs.org/dist/v$node_version/$archive" \
+    --output "$temp_dir/$archive"
+  tar -xJf "$temp_dir/$archive" -C "$temp_dir"
+  mkdir -p "$(dirname "$node_home")"
+  rm -rf "$node_home"
+  mv "$temp_dir/node-v$node_version-linux-$node_arch" "$node_home"
+else
+  echo "Node.js v$node_version is already installed."
+fi
+
+profile_marker="# tng-slack-agents orb Node.js v24.19.0"
+touch "$HOME/.bash_profile"
+if ! grep -Fqx "$profile_marker" "$HOME/.bash_profile"; then
+  cat >> "$HOME/.bash_profile" <<'EOF'
+
+# tng-slack-agents orb Node.js v24.19.0
+if [[ -d "$HOME/.local/node-v24.19.0/bin" ]]; then
+  export PATH="$HOME/.local/node-v24.19.0/bin:$PATH"
+fi
+EOF
+fi
+
+export PATH="$node_home/bin:$PATH"
+
+echo "Installing npm dependencies from package-lock.json..."
+cd "$repo_root"
+npm ci --no-audit --no-fund
+
+echo "Orb setup complete (Node.js $(node --version), npm $(npm --version))."
