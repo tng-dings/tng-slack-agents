@@ -3,8 +3,7 @@
     "enabled": true,
     "allowedWorkspaceIds": ["T0123456789"],
     "allowedUserIds": ["U0123456789"],
-    "liveUpdates": false,
-    "nativeStreaming": false
+    "liveUpdates": false
   },
   "openCode": {
     "baseUrl": "http://127.0.0.1:4096",

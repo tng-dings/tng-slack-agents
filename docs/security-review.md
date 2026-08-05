@@ -34,13 +34,13 @@ Events:
 
 - `message.im`
 - `app_home_opened`
-- `app_context_changed`
 
 Controls:
 
 - Socket Mode; no Request URL or inbound listener
 - Organization deployment disabled
 - Interactivity disabled
+- Native Slack streaming is rejected at startup because streamed output cannot be safely redacted
 - Direct messages only; bot messages and subtypes ignored
 - Exact workspace and user allowlists enforced in both the Slack gateway and runner
 - Slack `event_id` deduplication before a response is posted

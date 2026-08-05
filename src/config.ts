@@ -122,6 +122,7 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
   const allowedUserIds = stringArray(slack.allowedUserIds, "slack.allowedUserIds");
   if (enabled && allowedWorkspaceIds.length === 0) throw new Error("slack.allowedWorkspaceIds must not be empty when Slack is enabled");
   if (enabled && allowedUserIds.length === 0) throw new Error("slack.allowedUserIds must not be empty when Slack is enabled");
+  if (slack.nativeStreaming === true) throw new Error("slack.nativeStreaming is disabled because streamed output cannot be safely redacted");
 
   let model: RunnerConfig["openCode"]["model"];
   if (openCode.model !== undefined) {
@@ -138,7 +139,7 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
       allowedWorkspaceIds,
       allowedUserIds,
       liveUpdates: slack.liveUpdates === true,
-      nativeStreaming: slack.nativeStreaming === true,
+      nativeStreaming: false,
     },
     openCode: {
       baseUrl: loopbackBaseUrl(openCode.baseUrl),

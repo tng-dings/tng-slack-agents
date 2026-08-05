@@ -24,6 +24,19 @@ test("configuration rejects a non-loopback OpenCode endpoint", async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+test("configuration rejects unsafe native Slack streaming", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-streaming-config-"));
+  const filename = path.join(root, "config.json");
+  const config = {
+    slack: { enabled: false, allowedWorkspaceIds: [], allowedUserIds: [], nativeStreaming: true },
+    openCode: { baseUrl: "http://127.0.0.1:4096", workingRepository: root },
+    storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
+  };
+  await writeFile(filename, JSON.stringify(config));
+  await assert.rejects(loadConfig(filename), /cannot be safely redacted/);
+  await rm(root, { recursive: true, force: true });
+});
+
 test("Slack delivery failure cannot change a successful execution result", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-delivery-"));
   const config = testConfig(root);

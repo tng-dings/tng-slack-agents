@@ -7,7 +7,7 @@ Ask the Slack workspace owner or security administrator to approve the following
 1. Permit one internal, non-Marketplace custom Slack app named **Company Coding Agent** in the test workspace. The app code remains on the company laptop; Socket Mode makes outbound WebSocket/API connections only, and no inbound endpoint or external code deployment is used.
 2. Permit Slack's **Agents** feature with the current `agent_view` messaging experience and the Messages tab enabled. The older `assistant_view` is not requested.
 3. Approve only these bot scopes: `assistant:write`, `chat:write`, and `im:history`.
-4. Approve these bot events: `app_context_changed`, `app_home_opened`, and `message.im`.
+4. Approve these bot events: `app_home_opened` and `message.im`.
 5. Permit Socket Mode and creation of one app-level `xapp-` token with only `connections:write`. No public Request URL is required.
 6. Install the app to the workspace and provide the installer/operator with the bot `xoxb-` token through the approved secret-transfer channel. Do not paste either token into source control or ordinary Slack messages.
 7. Confirm the app is DM-only for the MVP, allowlists one exact workspace ID and one named tester's member ID, and must not be invited into channels or multi-person DMs.
