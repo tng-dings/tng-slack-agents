@@ -4,7 +4,9 @@ import path from "node:path";
 export interface RunnerConfig {
   slack: {
     enabled: boolean;
+    allowedWorkspaceIds: string[];
     allowedUserIds: string[];
+    liveUpdates: boolean;
     nativeStreaming: boolean;
   };
   openCode: {
@@ -19,11 +21,17 @@ export interface RunnerConfig {
     maxQueuedJobsPerUser: number;
     jobTimeoutSeconds: number;
     dailyCostCap: number;
+    maxPromptCharacters: number;
+    maxOutputCharacters: number;
+    maxAuditEventCharacters: number;
+    maxToolEventsPerJob: number;
   };
   storage: {
     databasePath: string;
     auditLogPath: string;
     worktreeRoot: string;
+    retentionDays: number;
+    retainJobContent: boolean;
   };
   queue: { pollIntervalMs: number };
 }
@@ -35,12 +43,18 @@ export interface RunnerSecrets {
 }
 
 const defaults = {
-  nativeStreaming: true,
+  liveUpdates: false,
+  nativeStreaming: false,
   maxConcurrentJobsPerUser: 1,
   maxConcurrentJobsGlobal: 1,
   maxQueuedJobsPerUser: 3,
   jobTimeoutSeconds: 1_800,
   dailyCostCap: 5,
+  maxPromptCharacters: 12_000,
+  maxOutputCharacters: 100_000,
+  maxAuditEventCharacters: 32_000,
+  maxToolEventsPerJob: 500,
+  retentionDays: 30,
   pollIntervalMs: 250,
 } as const;
 
@@ -64,6 +78,31 @@ function positiveNumber(value: unknown, fallback: number, name: string): number 
   return result;
 }
 
+function positiveInteger(value: unknown, fallback: number, name: string): number {
+  const result = positiveNumber(value, fallback, name);
+  if (!Number.isSafeInteger(result)) throw new Error(name + " must be a positive integer");
+  return result;
+}
+
+function stringArray(value: unknown, name: string): string[] {
+  if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
+    throw new Error(`${name} must be an array of non-empty strings`);
+  }
+  return [...value] as string[];
+}
+
+function loopbackBaseUrl(value: unknown): string {
+  const url = new URL(string(value, "openCode.baseUrl"));
+  const loopback = url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "::1";
+  if (url.protocol !== "http:" || !loopback) {
+    throw new Error("openCode.baseUrl must use http://127.0.0.1 or http://[::1]");
+  }
+  if (url.username || url.password || url.search || url.hash || (url.pathname !== "/" && url.pathname !== "")) {
+    throw new Error("openCode.baseUrl must not contain credentials, a path, query parameters, or a fragment");
+  }
+  return url.toString().replace(/\/$/, "");
+}
+
 function resolvePath(value: unknown, name: string, baseDirectory: string): string {
   const raw = string(value, name).replace(/%([^%]+)%/g, (_, key: string) => process.env[key] ?? `%${key}%`);
   return path.resolve(baseDirectory, raw);
@@ -79,10 +118,9 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
   const queue = object(root.queue ?? {}, "queue");
   const baseDirectory = path.dirname(absoluteConfigPath);
   const enabled = slack.enabled !== false;
-  const allowedUserIds = slack.allowedUserIds;
-  if (!Array.isArray(allowedUserIds) || allowedUserIds.some((id) => typeof id !== "string" || !id)) {
-    throw new Error("slack.allowedUserIds must be an array of Slack user IDs");
-  }
+  const allowedWorkspaceIds = stringArray(slack.allowedWorkspaceIds ?? [], "slack.allowedWorkspaceIds");
+  const allowedUserIds = stringArray(slack.allowedUserIds, "slack.allowedUserIds");
+  if (enabled && allowedWorkspaceIds.length === 0) throw new Error("slack.allowedWorkspaceIds must not be empty when Slack is enabled");
   if (enabled && allowedUserIds.length === 0) throw new Error("slack.allowedUserIds must not be empty when Slack is enabled");
 
   let model: RunnerConfig["openCode"]["model"];
@@ -97,29 +135,37 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
   return {
     slack: {
       enabled,
-      allowedUserIds: [...allowedUserIds] as string[],
-      nativeStreaming: slack.nativeStreaming !== false,
+      allowedWorkspaceIds,
+      allowedUserIds,
+      liveUpdates: slack.liveUpdates === true,
+      nativeStreaming: slack.nativeStreaming === true,
     },
     openCode: {
-      baseUrl: new URL(string(openCode.baseUrl, "openCode.baseUrl")).toString().replace(/\/$/, ""),
+      baseUrl: loopbackBaseUrl(openCode.baseUrl),
       username: typeof openCode.username === "string" ? openCode.username : "opencode",
       workingRepository: resolvePath(openCode.workingRepository, "openCode.workingRepository", baseDirectory),
       ...(model ? { model } : {}),
     },
     limits: {
-      maxConcurrentJobsPerUser: positiveNumber(limits.maxConcurrentJobsPerUser, defaults.maxConcurrentJobsPerUser, "limits.maxConcurrentJobsPerUser"),
-      maxConcurrentJobsGlobal: positiveNumber(limits.maxConcurrentJobsGlobal, defaults.maxConcurrentJobsGlobal, "limits.maxConcurrentJobsGlobal"),
-      maxQueuedJobsPerUser: positiveNumber(limits.maxQueuedJobsPerUser, defaults.maxQueuedJobsPerUser, "limits.maxQueuedJobsPerUser"),
-      jobTimeoutSeconds: positiveNumber(limits.jobTimeoutSeconds, defaults.jobTimeoutSeconds, "limits.jobTimeoutSeconds"),
+      maxConcurrentJobsPerUser: positiveInteger(limits.maxConcurrentJobsPerUser, defaults.maxConcurrentJobsPerUser, "limits.maxConcurrentJobsPerUser"),
+      maxConcurrentJobsGlobal: positiveInteger(limits.maxConcurrentJobsGlobal, defaults.maxConcurrentJobsGlobal, "limits.maxConcurrentJobsGlobal"),
+      maxQueuedJobsPerUser: positiveInteger(limits.maxQueuedJobsPerUser, defaults.maxQueuedJobsPerUser, "limits.maxQueuedJobsPerUser"),
+      jobTimeoutSeconds: positiveInteger(limits.jobTimeoutSeconds, defaults.jobTimeoutSeconds, "limits.jobTimeoutSeconds"),
       dailyCostCap: positiveNumber(limits.dailyCostCap, defaults.dailyCostCap, "limits.dailyCostCap"),
+      maxPromptCharacters: positiveInteger(limits.maxPromptCharacters, defaults.maxPromptCharacters, "limits.maxPromptCharacters"),
+      maxOutputCharacters: positiveInteger(limits.maxOutputCharacters, defaults.maxOutputCharacters, "limits.maxOutputCharacters"),
+      maxAuditEventCharacters: positiveInteger(limits.maxAuditEventCharacters, defaults.maxAuditEventCharacters, "limits.maxAuditEventCharacters"),
+      maxToolEventsPerJob: positiveInteger(limits.maxToolEventsPerJob, defaults.maxToolEventsPerJob, "limits.maxToolEventsPerJob"),
     },
     storage: {
       databasePath: resolvePath(storage.databasePath, "storage.databasePath", baseDirectory),
       auditLogPath: resolvePath(storage.auditLogPath, "storage.auditLogPath", baseDirectory),
       worktreeRoot: resolvePath(storage.worktreeRoot, "storage.worktreeRoot", baseDirectory),
+      retentionDays: positiveInteger(storage.retentionDays, defaults.retentionDays, "storage.retentionDays"),
+      retainJobContent: storage.retainJobContent === true,
     },
     queue: {
-      pollIntervalMs: positiveNumber(queue.pollIntervalMs, defaults.pollIntervalMs, "queue.pollIntervalMs"),
+      pollIntervalMs: positiveInteger(queue.pollIntervalMs, defaults.pollIntervalMs, "queue.pollIntervalMs"),
     },
   };
 }

@@ -58,6 +58,7 @@ export class OpenCodeExecutor implements Executor {
     password: string,
     private readonly workspaces: WorkspaceManager,
     private readonly audit: AuditLogger,
+    private readonly maxResponseCharacters = 250_000,
   ) {
     this.authorization = `Basic ${Buffer.from(`${config.username}:${password}`, "utf8").toString("base64")}`;
   }
@@ -121,6 +122,20 @@ export class OpenCodeExecutor implements Executor {
     ).catch(() => undefined);
   }
 
+  async cleanup(session: SessionRecord): Promise<void> {
+    if (!session.openCodeSessionId || !session.workingDirectory) return;
+    try {
+      await this.request(
+        `/session/${encodeURIComponent(session.openCodeSessionId)}`,
+        { method: "DELETE", signal: AbortSignal.timeout(5_000) },
+        session.workingDirectory,
+      );
+    } catch (error) {
+      if (!(error instanceof OpenCodeError) || error.code !== "OPENCODE_NOT_FOUND") throw error;
+    }
+    await this.workspaces.cleanup(session.workingDirectory);
+  }
+
   private async ensureSession(
     existingId: string | null,
     workingDirectory: string,
@@ -155,6 +170,7 @@ export class OpenCodeExecutor implements Executor {
   ): Promise<{ done: Promise<void> }> {
     const response = await fetch(this.url("/event", workingDirectory), {
       headers: this.headers(),
+      redirect: "error",
       signal: controller.signal,
     });
     if (!response.ok || !response.body) {
@@ -175,7 +191,10 @@ export class OpenCodeExecutor implements Executor {
       } else if (event.type === "permission.updated") {
         const permission = isObject(properties.permission) ? properties.permission : properties;
         if (typeof permission.id === "string") {
-          await this.audit.log("opencode_permission_rejected", permission);
+          await this.audit.log("opencode_permission_rejected", {
+            permissionId: permission.id,
+            sessionId: openCodeSessionId,
+          });
           await this.request(
             `/session/${encodeURIComponent(openCodeSessionId)}/permissions/${encodeURIComponent(permission.id)}`,
             { method: "POST", body: JSON.stringify({ response: "reject", remember: false }), signal: controller.signal },
@@ -200,6 +219,9 @@ export class OpenCodeExecutor implements Executor {
         const { done, value } = await reader.read();
         if (done) break;
         buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
+        if (buffer.length > this.maxResponseCharacters) {
+          throw new OpenCodeError("OpenCode event exceeded the configured response limit", "OPENCODE_RESPONSE_LIMIT");
+        }
         let boundary = buffer.indexOf("\n\n");
         while (boundary >= 0) {
           const block = buffer.slice(0, boundary);
@@ -214,7 +236,7 @@ export class OpenCodeExecutor implements Executor {
               const parsed: unknown = JSON.parse(data);
               if (isObject(parsed)) await onEvent(parsed);
             } catch (error) {
-              await this.audit.log("opencode_event_parse_failed", { data: data.slice(0, 1_000), error: errorMessage(error) });
+              await this.audit.log("opencode_event_parse_failed", { dataCharacters: data.length, error: errorMessage(error) });
             }
           }
           boundary = buffer.indexOf("\n\n");
@@ -231,17 +253,40 @@ export class OpenCodeExecutor implements Executor {
     const response = await fetch(this.url(endpoint, workingDirectory), {
       ...init,
       headers: this.headers(init.headers),
+      redirect: "error",
     });
     if (!response.ok) {
-      const detail = (await response.text()).slice(0, 2_000);
+      const detail = await this.readResponseText(response, 2_000);
       throw new OpenCodeError(
         `OpenCode request ${endpoint} failed (${response.status}): ${detail}`,
         response.status === 404 ? "OPENCODE_NOT_FOUND" : "OPENCODE_HTTP_ERROR",
       );
     }
     if (response.status === 204) return undefined;
-    const text = await response.text();
+    const text = await this.readResponseText(response, this.maxResponseCharacters);
     return text ? JSON.parse(text) : undefined;
+  }
+
+  private async readResponseText(response: Response, maxCharacters: number): Promise<string> {
+    if (!response.body) return "";
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let result = "";
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        result += decoder.decode(value, { stream: true });
+        if (result.length > maxCharacters) {
+          await reader.cancel();
+          throw new OpenCodeError("OpenCode response exceeded the configured limit", "OPENCODE_RESPONSE_LIMIT");
+        }
+      }
+      result += decoder.decode();
+      return result;
+    } finally {
+      reader.releaseLock();
+    }
   }
 
   private url(endpoint: string, workingDirectory?: string): string {

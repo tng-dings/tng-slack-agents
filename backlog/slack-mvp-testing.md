@@ -10,17 +10,18 @@ This is the actionable gate for the first live Slack test. Do not add a tester t
 - [ ] Approve the bot events `app_context_changed`, `app_home_opened`, and `message.im`.
 - [ ] Enable Socket Mode and create one app-level `xapp-` token with only `connections:write`.
 - [ ] Install the app and transfer its `xoxb-` bot token through the approved secret channel.
-- [ ] Confirm DM-only testing with one named allowlisted tester; do not invite the app to channels or multi-person DMs.
+- [ ] Confirm DM-only testing with one exact workspace ID and one named allowlisted tester; do not invite the app to channels or multi-person DMs.
 - [ ] Approve the data flow from Slack to company-managed local compute and onward to the separately approved model provider through OpenCode.
-- [ ] Approve audit capture of user ID, Slack thread, prompt, tool events, output, usage, cost, and failures.
-- [ ] Confirm the audit-data owner, access policy, and proposed 30-day operational retention procedure.
+- [ ] Approve audit capture of user ID, Slack thread, content hashes/lengths, tool metadata, usage, cost, and failures.
+- [ ] Confirm the audit-data owner, access policy, and automatic 30-day retention.
 - [ ] Record explicit written sign-off and the incident contact authorized to revoke tokens or uninstall the app.
 
 ## Operator preparation
 
 - [ ] Import and validate [`slack/manifest.json`](../slack/manifest.json) in Slack's app-management UI.
-- [ ] Record the approved tester's Slack member ID in `slack.allowedUserIds` in the local `config.json`.
-- [ ] Store the `xoxb-`, `xapp-`, OpenCode server password, and any provider key using the DPAPI bootstrap; never commit them.
+- [ ] Record the approved workspace ID in `slack.allowedWorkspaceIds` and tester ID in `slack.allowedUserIds`.
+- [ ] Install both WinSW services, then provision the separate gateway/worker DPAPI bundles with `Set-AgentRunnerSecrets.ps1`.
+- [ ] Run `Test-AgentRunnerSecurity.ps1` and archive its passing output with the approval ticket.
 - [ ] Point `openCode.workingRepository` at a disposable Git repository containing at least one commit.
 - [ ] Start the authenticated localhost OpenCode service and run `npm run doctor` successfully.
 - [ ] Run `npm run smoke` successfully before connecting Slack.
@@ -36,7 +37,7 @@ This is the actionable gate for the first live Slack test. Do not add a tester t
 - [ ] Restart the gateway with one queued job and confirm the queued job survives.
 - [ ] Restart during an active job and confirm it is marked failed rather than silently replayed.
 - [ ] Confirm timeout, queue limit, concurrency limit, daily cost cap, and allowlist enforcement.
-- [ ] Inspect SQLite and JSONL audit records for the tester, thread, prompt, tool events, output, usage, cost, and redaction.
+- [ ] Inspect SQLite and JSONL audit records for metadata-only content hashes/lengths, tool metadata, usage, cost, failures, and redaction.
 - [ ] Revoke or rotate the development tokens after testing if required by company policy.
 
 ## Exit criteria

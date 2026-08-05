@@ -11,9 +11,9 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx watch src/index.ts",
     "doctor": "tsx src/cli/doctor.ts",
-    "start": "node dist/index.js",
+    "start": "node dist/src/index.js",
     "smoke": "tsx src/cli/smoke.ts",
-    "test": "npm run build && node --test --test-isolation=none --test-concurrency=1 dist/test/opencode.test.js dist/test/runner.test.js"
+    "test": "npm run build && node --test --test-isolation=none --test-concurrency=1 dist/test/opencode.test.js dist/test/runner.test.js dist/test/security.test.js"
   },
   "dependencies": {
     "@slack/bolt": "^4.4.0",

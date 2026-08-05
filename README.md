@@ -6,12 +6,12 @@ This service accepts allowlisted direct messages from a Slack agent app, persist
 
 - Slack Bolt with outbound-only Socket Mode and the current `agent_view` experience.
 - DM-only messages; bot messages and other conversation types are ignored.
-- Immediate `Working…` reply followed by native Slack streaming when available, with throttled message updates as fallback.
+- Immediate `Working…` reply after authorization and event deduplication. Live updates are disabled by default so output can be redacted before delivery.
 - Durable SQLite queue and OpenCode session mapping keyed by workspace, channel, and thread timestamp.
 - Per-thread serialization, per-user/global concurrency limits, queue limit, timeout, allowlist, and daily cost cap.
-- JSONL and SQLite audit records for prompts, results, usage, failures, and OpenCode tool events, with common secret patterns redacted.
+- Bounded JSONL and SQLite audit records containing content hashes/lengths, usage, failures, and tool metadata; automatic 30-day retention is enabled by default.
 - A detached Git worktree per Slack thread. Running work is never silently replayed after a process crash; it is marked failed, while queued jobs survive.
-- DPAPI-protected service secrets and WinSW templates for separately supervised OpenCode and gateway services.
+- Separate DPAPI-protected gateway and worker secret bundles, distinct Windows virtual service identities, and explicit denial of Slack credentials in the worker launcher.
 
 ## Prerequisites
 
@@ -56,7 +56,7 @@ npm run doctor
 npm run dev
 ```
 
-Only Slack IDs listed in `slack.allowedUserIds` can enqueue work. Start with a disposable repository and a single allowlisted tester.
+Only exact workspace IDs in `slack.allowedWorkspaceIds` and user IDs in `slack.allowedUserIds` can enqueue work. Start with a disposable repository and a single allowlisted tester.
 
 ## Verification
 
@@ -72,17 +72,22 @@ The suite uses a fake authenticated OpenCode HTTP/SSE server but real SQLite per
 
 The `service` directory contains WinSW definitions for `OpenCodeServer` and `AgentRunner`. Build first, place a WinSW executable beside each XML using the matching base name (`OpenCodeServer.exe` and `AgentRunner.exe`), and copy `config.json` to `%ProgramData%\AgentRunner\config.json`.
 
-Run `scripts\Set-AgentRunnerSecrets.ps1` from an elevated PowerShell prompt. It writes one DPAPI LocalMachine-encrypted blob under `%ProgramData%\AgentRunner` and restricts its ACL to administrators, SYSTEM, and Local Service. Provider keys can be included without putting them in configuration, for example:
-
-```powershell
-.\scripts\Set-AgentRunnerSecrets.ps1 -AdditionalSecretNames ANTHROPIC_API_KEY
-```
-
-Write the absolute `node.exe` and `opencode.exe` locations into `%ProgramData%\AgentRunner\node-path.txt` and `opencode-path.txt`. Grant `NT AUTHORITY\LOCAL SERVICE` read/execute access to this project and modify access to the configured source repository (Git must update its `.git/worktrees` metadata). Then install and start both wrappers from an elevated prompt:
+Install both wrappers first so Windows creates their virtual service identities. Do not start them yet:
 
 ```powershell
 .\service\OpenCodeServer.exe install
 .\service\AgentRunner.exe install
+```
+
+Then run `scripts\Set-AgentRunnerSecrets.ps1` from an elevated PowerShell prompt. It writes independently encrypted and ACLed bundles: the gateway bundle contains Slack credentials and the OpenCode client password; the worker bundle contains only the OpenCode server password and explicitly named provider credentials. For example:
+
+```powershell
+.\scripts\Set-AgentRunnerSecrets.ps1 -WorkerSecretNames ANTHROPIC_API_KEY
+```
+
+Write the absolute `node.exe` location into `%ProgramData%\AgentRunner\node-path.txt` and the absolute `opencode.exe` location into `%ProgramData%\OpenCodeWorker\opencode-path.txt`. Grant both virtual identities read/execute access to this runner project so they can load their wrapper scripts. Grant `NT SERVICE\AgentRunner` the source-repository access needed to create Git worktrees, and grant `NT SERVICE\OpenCodeServer` only the configured repository/worktree and `.git/worktrees` access needed by agent execution. Then start both wrappers:
+
+```powershell
 .\service\OpenCodeServer.exe start
 .\service\AgentRunner.exe start
 ```
@@ -91,4 +96,4 @@ Before service installation, use an interactive development run to validate Open
 
 ## Security boundary
 
-Git worktrees prevent two Slack threads from editing the same checkout, but they are not an OS sandbox. A native OpenCode process can access resources available to its Windows service identity. The MVP therefore uses a low-privilege identity, a fixed configured repository, localhost-only authenticated HTTP, allowlisted Slack users, automatic rejection of OpenCode permission prompts, and conservative concurrency limits. Before expanding beyond trusted testers, move execution into WSL, a VM, or another hardened worker sandbox. See [the security notes](docs/security.md).
+Git worktrees prevent two Slack threads from editing the same checkout, but they are not an OS sandbox. The gateway and worker now run under different virtual service identities: Slack secrets never enter the OpenCode bundle or its process environment, and gateway-spawned Git commands receive a secret-free allowlisted environment. The worker still has its provider credential and can access resources granted to `NT SERVICE\OpenCodeServer`. Before expanding beyond trusted testers, move execution into a VM or comparably hardened worker sandbox with network policy. See [the security notes](docs/security.md) and [security review](docs/security-review.md).

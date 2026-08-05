@@ -4,7 +4,9 @@ export function testConfig(root: string): RunnerConfig {
   return {
     slack: {
       enabled: false,
+      allowedWorkspaceIds: ["T1"],
       allowedUserIds: ["U_ALLOWED"],
+      liveUpdates: false,
       nativeStreaming: false,
     },
     openCode: {
@@ -18,11 +20,17 @@ export function testConfig(root: string): RunnerConfig {
       maxQueuedJobsPerUser: 3,
       jobTimeoutSeconds: 2,
       dailyCostCap: 5,
+      maxPromptCharacters: 12_000,
+      maxOutputCharacters: 100_000,
+      maxAuditEventCharacters: 32_000,
+      maxToolEventsPerJob: 500,
     },
     storage: {
       databasePath: `${root}/runner.db`,
       auditLogPath: `${root}/audit.jsonl`,
       worktreeRoot: `${root}/worktrees`,
+      retentionDays: 30,
+      retainJobContent: true,
     },
     queue: { pollIntervalMs: 5 },
   };

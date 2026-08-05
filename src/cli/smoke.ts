@@ -11,12 +11,18 @@ async function main(): Promise<void> {
   const config = await loadConfig();
   const secrets = loadSecrets({ ...config, slack: { ...config.slack, enabled: false } });
   const database = new RunnerDatabase(config.storage.databasePath);
-  const audit = new AuditLogger(config.storage.auditLogPath, database, [secrets.openCodePassword]);
+  const audit = new AuditLogger(
+    config.storage.auditLogPath,
+    database,
+    [secrets.openCodePassword],
+    config.limits.maxAuditEventCharacters,
+  );
   const executor = new OpenCodeExecutor(
     config.openCode,
     secrets.openCodePassword,
     new WorkspaceManager(config.openCode.workingRepository, config.storage.worktreeRoot),
     audit,
+    config.limits.maxOutputCharacters + 64_000,
   );
   const prompt = process.argv.slice(2).join(" ").trim() || defaultPrompt;
   const sourceEventId = `local-smoke:${randomUUID()}`;
@@ -43,7 +49,7 @@ async function main(): Promise<void> {
           streamedOutput += delta;
           process.stdout.write(delta);
         },
-        onTool: (event) => audit.log("smoke_tool_event", event, { jobId: job.id, sessionKey: job.sessionKey }),
+        onTool: () => audit.log("smoke_tool_event", { observed: true }, { jobId: job.id, sessionKey: job.sessionKey }),
         onUsage: () => undefined,
       },
       controller.signal,
@@ -51,11 +57,22 @@ async function main(): Promise<void> {
     if (!streamedOutput && result.output) process.stdout.write(result.output);
     if (!result.output.endsWith("\n")) process.stdout.write("\n");
     database.updateSessionExecution(job.sessionKey, result.openCodeSessionId, result.workingDirectory);
-    database.completeJob(job.id, "succeeded", result.output, null, result.usage);
-    await audit.log("smoke_succeeded", { prompt, output: result.output, usage: result.usage }, { jobId: job.id, sessionKey: job.sessionKey });
+    database.completeJob(job.id, "succeeded", result.output, null, result.usage, config.storage.retainJobContent);
+    await audit.log(
+      "smoke_succeeded",
+      { promptCharacters: prompt.length, outputCharacters: result.output.length, usage: result.usage },
+      { jobId: job.id, sessionKey: job.sessionKey },
+    );
     console.log(`Cost: ${result.usage.cost}; input tokens: ${result.usage.inputTokens}; output tokens: ${result.usage.outputTokens}`);
   } catch (error) {
-    database.completeJob(job.id, "failed", "", error instanceof Error ? error.message : String(error), { cost: 0, inputTokens: 0, outputTokens: 0 });
+    database.completeJob(
+      job.id,
+      "failed",
+      "",
+      "Smoke execution failed; see console output.",
+      { cost: 0, inputTokens: 0, outputTokens: 0 },
+      config.storage.retainJobContent,
+    );
     throw error;
   } finally {
     clearTimeout(timeout);

@@ -5,9 +5,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
-$secretPath = Join-Path $DataDirectory "secrets.bin"
+$secretPath = Join-Path $DataDirectory "gateway-secrets.bin"
 $protected = [IO.File]::ReadAllBytes($secretPath)
-$entropy = [Text.Encoding]::UTF8.GetBytes("agent-runner-secrets-v1")
+$entropy = [Text.Encoding]::UTF8.GetBytes("agent-runner-secrets-v2")
 $plainBytes = [Security.Cryptography.ProtectedData]::Unprotect(
     $protected,
     $entropy,

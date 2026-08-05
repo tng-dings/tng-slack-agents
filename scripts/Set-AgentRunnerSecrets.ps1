@@ -1,8 +1,11 @@
 [CmdletBinding()]
 param(
-    [string]$DataDirectory = "$env:ProgramData\AgentRunner",
-    [string]$ServiceIdentity = "NT AUTHORITY\LOCAL SERVICE",
-    [string[]]$AdditionalSecretNames = @()
+    [string]$GatewayDataDirectory = "$env:ProgramData\AgentRunner",
+    [string]$WorkerDataDirectory = "$env:ProgramData\OpenCodeWorker",
+    [string]$GatewayServiceIdentity = "NT SERVICE\AgentRunner",
+    [string]$WorkerServiceIdentity = "NT SERVICE\OpenCodeServer",
+    [Alias("AdditionalSecretNames")]
+    [string[]]$WorkerSecretNames = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -18,54 +21,109 @@ function Read-PlainSecret([string]$Prompt) {
     }
 }
 
-$secrets = @{
-    SLACK_BOT_TOKEN = Read-PlainSecret "Slack bot token (xoxb-...)"
-    SLACK_APP_TOKEN = Read-PlainSecret "Slack app token (xapp-...)"
-    OPENCODE_SERVER_PASSWORD = Read-PlainSecret "OpenCode server password"
+function Assert-Identity([string]$Identity) {
+    try {
+        [void](New-Object Security.Principal.NTAccount($Identity)).Translate([Security.Principal.SecurityIdentifier])
+    }
+    catch {
+        throw "Windows identity '$Identity' does not exist. Install both WinSW services before provisioning secrets."
+    }
 }
-foreach ($secretName in $AdditionalSecretNames) {
+
+function Set-RestrictedDirectoryAcl(
+    [string]$Path,
+    [string[]]$ServiceIdentities,
+    [string]$ServiceRights = "Modify"
+) {
+    New-Item -ItemType Directory -Force -Path $Path | Out-Null
+    $acl = New-Object Security.AccessControl.DirectorySecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($identity in @("NT AUTHORITY\SYSTEM", "BUILTIN\Administrators")) {
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            $identity, "FullControl", "ContainerInherit,ObjectInherit", "None", "Allow"
+        )))
+    }
+    foreach ($identity in $ServiceIdentities) {
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
+            $identity, $ServiceRights, "ContainerInherit,ObjectInherit", "None", "Allow"
+        )))
+    }
+    Set-Acl -Path $Path -AclObject $acl
+}
+
+function Write-ProtectedSecrets([string]$Path, [hashtable]$Secrets, [string]$ReadIdentity) {
+    $plainBytes = [Text.Encoding]::UTF8.GetBytes(($Secrets | ConvertTo-Json -Compress))
+    $entropy = [Text.Encoding]::UTF8.GetBytes("agent-runner-secrets-v2")
+    try {
+        $protected = [Security.Cryptography.ProtectedData]::Protect(
+            $plainBytes,
+            $entropy,
+            [Security.Cryptography.DataProtectionScope]::LocalMachine
+        )
+        [IO.File]::WriteAllBytes($Path, $protected)
+    }
+    finally {
+        [Array]::Clear($plainBytes, 0, $plainBytes.Length)
+        $Secrets.Clear()
+    }
+
+    $acl = New-Object Security.AccessControl.FileSecurity
+    $acl.SetAccessRuleProtection($true, $false)
+    foreach ($identity in @("NT AUTHORITY\SYSTEM", "BUILTIN\Administrators")) {
+        $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($identity, "FullControl", "Allow")))
+    }
+    $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($ReadIdentity, "Read", "Allow")))
+    Set-Acl -Path $Path -AclObject $acl
+}
+
+Assert-Identity $GatewayServiceIdentity
+Assert-Identity $WorkerServiceIdentity
+
+foreach ($secretName in $WorkerSecretNames) {
     if ($secretName -notmatch '^[A-Z][A-Z0-9_]+$') {
         throw "Invalid environment variable name: $secretName"
     }
-    $secrets[$secretName] = Read-PlainSecret "$secretName"
+    $reservedNames = @(
+        "APPDATA", "COMSPEC", "HOME", "HOMEDRIVE", "HOMEPATH", "LOCALAPPDATA",
+        "NODE_OPTIONS", "NODE_PATH", "PATH", "PATHEXT", "PROGRAMDATA", "PSMODULEPATH",
+        "SYSTEMROOT", "TEMP", "TMP", "USERPROFILE", "WINDIR"
+    )
+    if (
+        $secretName -like 'SLACK_*' -or
+        $secretName -like 'OPENCODE_*' -or
+        $secretName -like 'AGENT_RUNNER_*' -or
+        $secretName -like 'GIT_*' -or
+        $secretName -in $reservedNames
+    ) {
+        throw "WorkerSecretNames must contain provider credentials only: $secretName"
+    }
 }
 
-New-Item -ItemType Directory -Force -Path $DataDirectory | Out-Null
-$plainBytes = [Text.Encoding]::UTF8.GetBytes(($secrets | ConvertTo-Json -Compress))
-$entropy = [Text.Encoding]::UTF8.GetBytes("agent-runner-secrets-v1")
+Set-RestrictedDirectoryAcl $GatewayDataDirectory @($GatewayServiceIdentity)
+Set-RestrictedDirectoryAcl $WorkerDataDirectory @($WorkerServiceIdentity) "ReadAndExecute"
+$worktreeDirectory = Join-Path $WorkerDataDirectory "worktrees"
+Set-RestrictedDirectoryAcl $worktreeDirectory @($GatewayServiceIdentity, $WorkerServiceIdentity)
+
+$openCodePassword = Read-PlainSecret "OpenCode server password"
+$gatewaySecrets = @{
+    SLACK_BOT_TOKEN = Read-PlainSecret "Slack bot token (xoxb-...)"
+    SLACK_APP_TOKEN = Read-PlainSecret "Slack app token (xapp-...)"
+    OPENCODE_SERVER_PASSWORD = $openCodePassword
+}
+$workerSecrets = @{
+    OPENCODE_SERVER_PASSWORD = $openCodePassword
+}
+foreach ($secretName in $WorkerSecretNames) {
+    $workerSecrets[$secretName] = Read-PlainSecret $secretName
+}
+
 try {
-    $protected = [Security.Cryptography.ProtectedData]::Protect(
-        $plainBytes,
-        $entropy,
-        [Security.Cryptography.DataProtectionScope]::LocalMachine
-    )
-    [IO.File]::WriteAllBytes((Join-Path $DataDirectory "secrets.bin"), $protected)
+    Write-ProtectedSecrets (Join-Path $GatewayDataDirectory "gateway-secrets.bin") $gatewaySecrets $GatewayServiceIdentity
+    Write-ProtectedSecrets (Join-Path $WorkerDataDirectory "worker-secrets.bin") $workerSecrets $WorkerServiceIdentity
 }
 finally {
-    [Array]::Clear($plainBytes, 0, $plainBytes.Length)
-    $secrets.Clear()
+    $openCodePassword = $null
 }
 
-$acl = New-Object Security.AccessControl.DirectorySecurity
-$acl.SetAccessRuleProtection($true, $false)
-foreach ($identity in @("NT AUTHORITY\SYSTEM", "BUILTIN\Administrators", $ServiceIdentity)) {
-    $rights = if ($identity -eq $ServiceIdentity) { "Modify" } else { "FullControl" }
-    $rule = New-Object Security.AccessControl.FileSystemAccessRule(
-        $identity,
-        $rights,
-        "ContainerInherit,ObjectInherit",
-        "None",
-        "Allow"
-    )
-    $acl.AddAccessRule($rule)
-}
-Set-Acl -Path $DataDirectory -AclObject $acl
-$secretAcl = New-Object Security.AccessControl.FileSecurity
-$secretAcl.SetAccessRuleProtection($true, $false)
-foreach ($identity in @("NT AUTHORITY\SYSTEM", "BUILTIN\Administrators", $ServiceIdentity)) {
-    $rights = if ($identity -eq $ServiceIdentity) { "Read" } else { "FullControl" }
-    $rule = New-Object Security.AccessControl.FileSystemAccessRule($identity, $rights, "Allow")
-    $secretAcl.AddAccessRule($rule)
-}
-Set-Acl -Path (Join-Path $DataDirectory "secrets.bin") -AclObject $secretAcl
-Write-Host "Encrypted secrets written to $DataDirectory\secrets.bin"
+Write-Host "Gateway secrets written for $GatewayServiceIdentity."
+Write-Host "Worker secrets written for $WorkerServiceIdentity; no Slack credential is present in the worker bundle."

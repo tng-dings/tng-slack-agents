@@ -56,9 +56,10 @@ test("runner persists jobs and sessions, enforces authz, accounts usage, and red
     userId: "U_ALLOWED",
     prompt: "Do work with password=super-secret",
   };
-  const job = await runner.submit(submission);
+  const { job } = await runner.submit(submission);
   const duplicate = await runner.submit(submission);
-  assert.equal(duplicate.id, job.id);
+  assert.equal(duplicate.job.id, job.id);
+  assert.equal(duplicate.isNew, false);
   await waitFor(() => database.getJob(job.id)?.status === "succeeded");
 
   assert.equal(database.getJob(job.id)?.output, "done");
@@ -69,6 +70,8 @@ test("runner persists jobs and sessions, enforces authz, accounts usage, and red
     runner.submit({ ...submission, sourceEventId: "unauthorized", userId: "U_DENIED" }),
     AuthorizationError,
   );
+  assert.equal(database.getJobBySourceEvent("unauthorized"), undefined);
+  await audit.log("redaction_probe", { authorization: "super-secret" });
   await runner.stop();
   await audit.flush();
   database.close();

@@ -152,6 +152,10 @@ export class RunnerDatabase {
     `).run(openCodeSessionId, workingDirectory, now(), sessionKey);
   }
 
+  updateJobReplyTs(id: string, replyTs: string): void {
+    this.sqlite.prepare("UPDATE jobs SET reply_ts = ? WHERE id = ?").run(replyTs, id);
+  }
+
   insertJob(id: string, submission: JobSubmission, status: JobStatus = "queued", error: string | null = null): JobRecord {
     const session = this.ensureSession(submission);
     const timestamp = now();
@@ -228,12 +232,20 @@ export class RunnerDatabase {
     this.sqlite.prepare("UPDATE jobs SET output = ? WHERE id = ?").run(output, id);
   }
 
-  completeJob(id: string, status: Extract<JobStatus, "succeeded" | "failed" | "timed_out">, output: string, error: string | null, usage: Usage): void {
+  completeJob(
+    id: string,
+    status: Extract<JobStatus, "succeeded" | "failed" | "timed_out">,
+    output: string,
+    error: string | null,
+    usage: Usage,
+    retainContent = true,
+  ): void {
     this.transaction(() => {
       this.sqlite.prepare(`
-        UPDATE jobs SET status = ?, output = ?, error = ?, cost = ?, input_tokens = ?, output_tokens = ?, finished_at = ?
+        UPDATE jobs SET status = ?, prompt = CASE WHEN ? THEN prompt ELSE '' END, output = ?, error = ?,
+          cost = ?, input_tokens = ?, output_tokens = ?, finished_at = ?
         WHERE id = ?
-      `).run(status, output, error, usage.cost, usage.inputTokens, usage.outputTokens, now(), id);
+      `).run(status, retainContent ? 1 : 0, retainContent ? output : "", error, usage.cost, usage.inputTokens, usage.outputTokens, now(), id);
       if (usage.cost || usage.inputTokens || usage.outputTokens) {
         const job = this.getJob(id)!;
         this.sqlite.prepare(`
@@ -248,6 +260,27 @@ export class RunnerDatabase {
     });
   }
 
+  purgeExpired(retentionDays: number): SessionRecord[] {
+    const cutoff = new Date(Date.now() - retentionDays * 86_400_000).toISOString();
+    return this.transaction(() => {
+      this.sqlite.prepare("DELETE FROM audit_events WHERE created_at < ?").run(cutoff);
+      this.sqlite.prepare("DELETE FROM daily_usage WHERE usage_date < ?").run(cutoff.slice(0, 10));
+      this.sqlite.prepare("DELETE FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ?").run(cutoff);
+      const rows = this.sqlite.prepare(`
+        SELECT * FROM sessions WHERE updated_at < ?
+          AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.session_key = sessions.session_key)
+      `).all(cutoff) as Row[];
+      return rows.map(mapSession);
+    });
+  }
+
+  deleteSession(sessionKey: string): void {
+    this.sqlite.prepare(`
+      DELETE FROM sessions WHERE session_key = ?
+        AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.session_key = sessions.session_key)
+    `).run(sessionKey);
+  }
+
   dailyUsage(userId: string): Usage {
     const row = this.sqlite.prepare(`
       SELECT cost, input_tokens, output_tokens FROM daily_usage WHERE usage_date = ? AND user_id = ?
@@ -257,13 +290,15 @@ export class RunnerDatabase {
       : { cost: 0, inputTokens: 0, outputTokens: 0 };
   }
 
-  recoverInterruptedJobs(): JobRecord[] {
+  recoverInterruptedJobs(retainContent = true): JobRecord[] {
     const rows = this.sqlite.prepare("SELECT * FROM jobs WHERE status = 'running'").all() as Row[];
     if (rows.length) {
       this.sqlite.prepare(`
-        UPDATE jobs SET status = 'failed', error = 'Runner restarted while this job was executing', finished_at = ?
+        UPDATE jobs SET status = 'failed', prompt = CASE WHEN ? THEN prompt ELSE '' END,
+          output = CASE WHEN ? THEN output ELSE '' END,
+          error = 'Runner restarted while this job was executing', finished_at = ?
         WHERE status = 'running'
-      `).run(now());
+      `).run(retainContent ? 1 : 0, retainContent ? 1 : 0, now());
     }
     return rows.map(mapJob);
   }

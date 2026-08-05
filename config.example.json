@@ -1,8 +1,10 @@
 {
   "slack": {
     "enabled": true,
+    "allowedWorkspaceIds": ["T0123456789"],
     "allowedUserIds": ["U0123456789"],
-    "nativeStreaming": true
+    "liveUpdates": false,
+    "nativeStreaming": false
   },
   "openCode": {
     "baseUrl": "http://127.0.0.1:4096",
@@ -14,12 +16,18 @@
     "maxConcurrentJobsGlobal": 1,
     "maxQueuedJobsPerUser": 3,
     "jobTimeoutSeconds": 1800,
-    "dailyCostCap": 5
+    "dailyCostCap": 5,
+    "maxPromptCharacters": 12000,
+    "maxOutputCharacters": 100000,
+    "maxAuditEventCharacters": 32000,
+    "maxToolEventsPerJob": 500
   },
   "storage": {
-    "databasePath": ".data/agent-runner.db",
-    "auditLogPath": ".data/audit.jsonl",
-    "worktreeRoot": ".data/worktrees"
+    "databasePath": "data/agent-runner.db",
+    "auditLogPath": "data/audit.jsonl",
+    "worktreeRoot": "..\\OpenCodeWorker\\worktrees",
+    "retentionDays": 30,
+    "retainJobContent": false
   },
   "queue": {
     "pollIntervalMs": 250

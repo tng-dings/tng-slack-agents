@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { AuditLogger } from "./audit.js";
 import type { RunnerConfig } from "./config.js";
 import type { RunnerDatabase } from "./database.js";
@@ -9,14 +9,43 @@ import type {
   JobReporter,
   JobSubmission,
   ReporterFactory,
+  SubmissionResult,
   Usage,
 } from "./types.js";
 
 const emptyUsage = (): Usage => ({ cost: 0, inputTokens: 0, outputTokens: 0 });
 
+function contentMetadata(value: string): { characters: number; sha256: string } {
+  return { characters: value.length, sha256: createHash("sha256").update(value).digest("hex") };
+}
+
+function toolMetadata(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return { type: typeof value };
+  const event = value as Record<string, unknown>;
+  const state = event.state && typeof event.state === "object" && !Array.isArray(event.state)
+    ? event.state as Record<string, unknown>
+    : {};
+  return {
+    ...(typeof event.tool === "string" ? { tool: event.tool } : {}),
+    ...(typeof event.callID === "string" ? { callId: event.callID } : {}),
+    ...(typeof state.status === "string" ? { status: state.status } : {}),
+  };
+}
+
+function userFacingFailure(reason: unknown, jobId: string): string {
+  if (reason instanceof TimeoutError || reason instanceof LimitError) return reason.message;
+  return `The agent job failed. Reference: ${jobId}`;
+}
+
+function errorMetadata(reason: unknown): { errorType: string; errorCode?: string } {
+  if (reason instanceof RunnerError) return { errorType: reason.name, errorCode: reason.code };
+  if (reason instanceof Error) return { errorType: reason.name || "Error" };
+  return { errorType: typeof reason };
+}
+
 export class ConsoleReporter implements JobReporter {
   async start(): Promise<void> {
-    console.log("Working…");
+    console.log("Working...");
   }
   async append(delta: string): Promise<void> {
     process.stdout.write(delta);
@@ -31,8 +60,10 @@ export class ConsoleReporter implements JobReporter {
 
 export class AgentRunner {
   private readonly allowedUsers: Set<string>;
+  private readonly allowedWorkspaces: Set<string>;
   private readonly active = new Set<Promise<void>>();
   private timer?: NodeJS.Timeout;
+  private maintenanceTimer?: NodeJS.Timeout;
   private stopping = false;
 
   constructor(
@@ -43,50 +74,81 @@ export class AgentRunner {
     private readonly reporterFactory: ReporterFactory = () => new ConsoleReporter(),
   ) {
     this.allowedUsers = new Set(config.slack.allowedUserIds);
+    this.allowedWorkspaces = new Set(config.slack.allowedWorkspaceIds);
   }
 
-  async submit(submission: JobSubmission): Promise<JobRecord> {
+  async submit(submission: JobSubmission): Promise<SubmissionResult> {
+    if (!this.allowedWorkspaces.has(submission.workspaceId) || !this.allowedUsers.has(submission.userId)) {
+      const rejection = new AuthorizationError();
+      await this.audit.log(
+        "job_rejected",
+        { reason: rejection.code, workspaceId: submission.workspaceId, channelId: submission.channelId },
+        { userId: submission.userId },
+      );
+      throw rejection;
+    }
     const existing = this.database.getJobBySourceEvent(submission.sourceEventId);
-    if (existing) return existing;
+    if (existing) return { job: existing, isNew: false };
     const prompt = submission.prompt.trim();
     if (!prompt) throw new LimitError("The prompt is empty.", "EMPTY_PROMPT");
+    if (prompt.length > this.config.limits.maxPromptCharacters) {
+      throw new LimitError("The prompt exceeds the configured character limit.", "PROMPT_LIMIT");
+    }
     const normalized = { ...submission, prompt };
     const rejection = this.rejectionFor(normalized);
     if (rejection) {
-      const rejected = this.database.insertJob(randomUUID(), normalized, "rejected", rejection.message);
-      await this.audit.log("job_rejected", { prompt, reason: rejection.code }, this.context(rejected));
+      await this.audit.log(
+        "job_rejected",
+        { reason: rejection.code, workspaceId: submission.workspaceId, channelId: submission.channelId },
+        { userId: submission.userId },
+      );
       throw rejection;
     }
     const job = this.database.insertJob(randomUUID(), normalized);
     await this.audit.log(
       "job_queued",
-      { prompt, workspaceId: job.workspaceId, channelId: job.channelId, threadTs: job.threadTs },
+      { prompt: contentMetadata(prompt), workspaceId: job.workspaceId, channelId: job.channelId, threadTs: job.threadTs },
       this.context(job),
     );
+    try {
+      const started = await this.reporterFactory(job).start();
+      if (started?.replyTs) this.database.updateJobReplyTs(job.id, started.replyTs);
+    } catch (error) {
+      await this.audit.log(
+        "delivery_failed",
+        { phase: "queued", error: error instanceof Error ? error.message : String(error) },
+        this.context(job),
+      );
+    }
     queueMicrotask(() => this.pump());
-    return job;
+    return { job: this.database.getJob(job.id)!, isNew: true };
   }
 
   async start(): Promise<void> {
-    const interrupted = this.database.recoverInterruptedJobs();
+    await this.maintenance();
+    const interrupted = this.database.recoverInterruptedJobs(this.config.storage.retainJobContent);
     for (const job of interrupted) {
       await this.audit.log("job_interrupted", { reason: "runner_restart" }, this.context(job));
       await this.reporterFactory(job).fail("This job was interrupted by an agent-runner restart. Please send the request again.").catch(() => undefined);
     }
     this.timer = setInterval(() => this.pump(), this.config.queue.pollIntervalMs);
     this.timer.unref();
+    this.maintenanceTimer = setInterval(() => {
+      void this.maintenance().catch((error: unknown) => console.error("Retention maintenance failed", error));
+    }, 86_400_000);
+    this.maintenanceTimer.unref();
     this.pump();
   }
 
   async stop(): Promise<void> {
     this.stopping = true;
     if (this.timer) clearInterval(this.timer);
+    if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
     await Promise.allSettled([...this.active]);
     await this.audit.flush();
   }
 
   private rejectionFor(submission: JobSubmission): RunnerError | undefined {
-    if (!this.allowedUsers.has(submission.userId)) return new AuthorizationError();
     if (this.database.countJobs(submission.userId, "queued") >= this.config.limits.maxQueuedJobsPerUser) {
       return new LimitError("Your queue is full. Wait for an existing job to finish.", "QUEUE_LIMIT");
     }
@@ -104,18 +166,18 @@ export class AgentRunner {
         this.config.limits.maxConcurrentJobsGlobal,
       );
       if (!job) return;
-      const task = this.process(job).finally(() => {
-        this.active.delete(task);
-        queueMicrotask(() => this.pump());
-      });
+      const task = this.process(job)
+        .catch((error: unknown) => console.error("Job processing failed unexpectedly", errorMetadata(error)))
+        .finally(() => {
+          this.active.delete(task);
+          queueMicrotask(() => this.pump());
+        });
       this.active.add(task);
     }
   }
 
   private async process(job: JobRecord): Promise<void> {
     const reporter = this.reporterFactory(job);
-    const session = this.database.getSession(job.sessionKey);
-    if (!session) throw new Error(`Missing session ${job.sessionKey}`);
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(new TimeoutError(`Job exceeded ${this.config.limits.jobTimeoutSeconds} seconds`)),
@@ -123,22 +185,44 @@ export class AgentRunner {
     );
     let output = "";
     let usage = emptyUsage();
+    let succeeded = false;
+    let failureForUser = "";
+    let toolEventCount = 0;
     const costBeforeJob = this.database.dailyUsage(job.userId).cost;
 
     try {
-      await reporter.start();
-      await this.audit.log("job_started", { prompt: job.prompt }, this.context(job));
+      const session = this.database.getSession(job.sessionKey);
+      if (!session) throw new Error(`Missing session ${job.sessionKey}`);
+      await this.audit.log("job_started", { prompt: contentMetadata(job.prompt) }, this.context(job));
       const result = await this.executor.execute(
         job,
         session,
         {
           onText: async (delta) => {
-            output += delta;
+            const remaining = this.config.limits.maxOutputCharacters - output.length;
+            if (remaining <= 0) {
+              const limitError = new LimitError("The agent output exceeded the configured limit.", "OUTPUT_LIMIT");
+              controller.abort(limitError);
+              throw limitError;
+            }
+            const accepted = delta.slice(0, remaining);
+            output += accepted;
             this.database.appendOutput(job.id, output);
-            await reporter.append(delta);
+            await reporter.append(accepted);
+            if (accepted.length !== delta.length) {
+              const limitError = new LimitError("The agent output exceeded the configured limit.", "OUTPUT_LIMIT");
+              controller.abort(limitError);
+              throw limitError;
+            }
           },
           onTool: async (event) => {
-            await this.audit.log("tool_event", event, this.context(job));
+            toolEventCount += 1;
+            if (toolEventCount > this.config.limits.maxToolEventsPerJob) {
+              const limitError = new LimitError("The agent exceeded the configured tool-event limit.", "TOOL_EVENT_LIMIT");
+              controller.abort(limitError);
+              throw limitError;
+            }
+            await this.audit.log("tool_event", toolMetadata(event), this.context(job));
           },
           onUsage: (current) => {
             usage = current;
@@ -149,29 +233,72 @@ export class AgentRunner {
         },
         controller.signal,
       );
-      output = result.output || output;
+      const resultOutput = result.output || output;
+      if (resultOutput.length > this.config.limits.maxOutputCharacters) {
+        output = resultOutput.slice(0, this.config.limits.maxOutputCharacters);
+        throw new LimitError("The agent output exceeded the configured limit.", "OUTPUT_LIMIT");
+      }
+      output = resultOutput;
       usage = result.usage;
       this.database.updateSessionExecution(job.sessionKey, result.openCodeSessionId, result.workingDirectory);
-      this.database.completeJob(job.id, "succeeded", output, null, usage);
-      await this.audit.log("job_succeeded", { prompt: job.prompt, output, usage }, this.context(job));
-      await reporter.succeed(output);
+      this.database.completeJob(job.id, "succeeded", output, null, usage, this.config.storage.retainJobContent);
+      succeeded = true;
+      await this.audit.log(
+        "job_succeeded",
+        { prompt: contentMetadata(job.prompt), output: contentMetadata(output), usage },
+        this.context(job),
+      ).catch((error: unknown) => console.error("Unable to record successful job audit", error));
     } catch (error) {
       const reason = controller.signal.aborted ? controller.signal.reason : error;
       const timedOut = reason instanceof TimeoutError;
-      const message = reason instanceof Error ? reason.message : String(reason);
-      this.database.completeJob(job.id, timedOut ? "timed_out" : "failed", output, message, usage);
+      failureForUser = userFacingFailure(reason, job.id);
+      this.database.completeJob(
+        job.id,
+        timedOut ? "timed_out" : "failed",
+        output,
+        failureForUser,
+        usage,
+        this.config.storage.retainJobContent,
+      );
       await this.audit.log(
         timedOut ? "job_timed_out" : "job_failed",
-        { prompt: job.prompt, output, usage, error: message },
+        { prompt: contentMetadata(job.prompt), output: contentMetadata(output), usage, ...errorMetadata(reason) },
         this.context(job),
-      );
-      await reporter.fail(message).catch(() => undefined);
+      ).catch((auditError: unknown) => console.error("Unable to record failed job audit", auditError));
     } finally {
       clearTimeout(timeout);
+    }
+
+    try {
+      if (succeeded) await reporter.succeed(output);
+      else await reporter.fail(failureForUser);
+    } catch (error) {
+      await this.audit.log(
+        "delivery_failed",
+        { phase: succeeded ? "succeeded" : "failed", ...errorMetadata(error) },
+        this.context(job),
+      ).catch((auditError: unknown) => console.error("Unable to record delivery failure", auditError));
     }
   }
 
   private context(job: JobRecord): { jobId: string; userId: string; sessionKey: string } {
     return { jobId: job.id, userId: job.userId, sessionKey: job.sessionKey };
+  }
+
+  private async maintenance(): Promise<void> {
+    const expiredSessions = this.database.purgeExpired(this.config.storage.retentionDays);
+    for (const session of expiredSessions) {
+      try {
+        await this.executor.cleanup?.(session);
+        this.database.deleteSession(session.sessionKey);
+      } catch (error) {
+        await this.audit.log(
+          "retention_cleanup_failed",
+          { sessionKey: session.sessionKey, ...errorMetadata(error) },
+          { sessionKey: session.sessionKey },
+        );
+      }
+    }
+    await this.audit.prune(this.config.storage.retentionDays);
   }
 }

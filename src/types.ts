@@ -75,13 +75,19 @@ export interface Executor {
     signal: AbortSignal,
   ): Promise<ExecutionResult>;
   abort?(openCodeSessionId: string, workingDirectory: string): Promise<void>;
+  cleanup?(session: SessionRecord): Promise<void>;
 }
 
 export interface JobReporter {
-  start(): Promise<void>;
+  start(): Promise<{ replyTs?: string } | void>;
   append(delta: string): Promise<unknown> | unknown;
   succeed(output: string): Promise<unknown> | unknown;
   fail(message: string): Promise<void>;
+}
+
+export interface SubmissionResult {
+  job: JobRecord;
+  isNew: boolean;
 }
 
 export type ReporterFactory = (job: JobRecord) => JobReporter;

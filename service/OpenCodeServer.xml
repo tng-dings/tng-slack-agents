@@ -6,8 +6,7 @@
   <arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BASE%\..\scripts\Start-OpenCode.ps1"</arguments>
   <workingdirectory>%BASE%\..</workingdirectory>
   <serviceaccount>
-    <username>NT AUTHORITY\LOCAL SERVICE</username>
-    <allowservicelogon>true</allowservicelogon>
+    <username>NT SERVICE\OpenCodeServer</username>
   </serviceaccount>
   <startmode>Automatic</startmode>
   <delayedAutoStart>true</delayedAutoStart>

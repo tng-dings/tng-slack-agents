@@ -14,9 +14,15 @@ async function main(): Promise<void> {
     secrets.openCodePassword,
     secrets.slackBotToken ?? "",
     secrets.slackAppToken ?? "",
-  ]);
+  ], config.limits.maxAuditEventCharacters);
   const workspaces = new WorkspaceManager(config.openCode.workingRepository, config.storage.worktreeRoot);
-  const executor = new OpenCodeExecutor(config.openCode, secrets.openCodePassword, workspaces, audit);
+  const executor = new OpenCodeExecutor(
+    config.openCode,
+    secrets.openCodePassword,
+    workspaces,
+    audit,
+    config.limits.maxOutputCharacters + 64_000,
+  );
   const slack = config.slack.enabled ? new SlackGateway(config, secrets) : undefined;
   const runner = new AgentRunner(config, database, executor, audit, (job) => slack?.reporter(job) ?? {
     start: async () => undefined,

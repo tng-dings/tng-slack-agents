@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { access } from "node:fs/promises";
 import { promisify } from "node:util";
 import { loadConfig, loadSecrets } from "../config.js";
+import { unprivilegedChildEnvironment } from "../environment.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -13,7 +14,11 @@ async function main(): Promise<void> {
     name: "working repository",
     run: async () => {
       await access(config.openCode.workingRepository);
-      const result = await execFileAsync("git", ["-C", config.openCode.workingRepository, "rev-parse", "--verify", "HEAD"]);
+      const result = await execFileAsync(
+        "git",
+        ["-C", config.openCode.workingRepository, "rev-parse", "--verify", "HEAD"],
+        { env: unprivilegedChildEnvironment() },
+      );
       return result.stdout.trim().slice(0, 12);
     },
   });
@@ -23,6 +28,7 @@ async function main(): Promise<void> {
       const authorization = `Basic ${Buffer.from(`${config.openCode.username}:${secrets.openCodePassword}`).toString("base64")}`;
       const response = await fetch(`${config.openCode.baseUrl}/global/health`, {
         headers: { authorization },
+        redirect: "error",
         signal: AbortSignal.timeout(5_000),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);

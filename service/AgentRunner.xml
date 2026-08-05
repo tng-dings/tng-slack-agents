@@ -6,8 +6,7 @@
   <arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BASE%\..\scripts\Start-AgentRunner.ps1"</arguments>
   <workingdirectory>%BASE%\..</workingdirectory>
   <serviceaccount>
-    <username>NT AUTHORITY\LOCAL SERVICE</username>
-    <allowservicelogon>true</allowservicelogon>
+    <username>NT SERVICE\AgentRunner</username>
   </serviceaccount>
   <startmode>Automatic</startmode>
   <delayedAutoStart>true</delayedAutoStart>

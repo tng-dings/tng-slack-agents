@@ -25,6 +25,7 @@ test("OpenCode executor creates a worktree, streams events, and returns usage", 
   const subscribers = new Set<ServerResponse>();
   const directories: string[] = [];
   let sawAuthorization = false;
+  let deletedSession = false;
   const server = createServer((request, response) => {
     sawAuthorization ||= request.headers.authorization === `Basic ${Buffer.from("opencode:test-password").toString("base64")}`;
     const url = new URL(request.url ?? "/", "http://localhost");
@@ -50,6 +51,12 @@ test("OpenCode executor creates a worktree, streams events, and returns usage", 
     if (request.method === "GET" && url.pathname === "/session/session-1") {
       response.setHeader("content-type", "application/json");
       response.end(JSON.stringify({ id: "session-1" }));
+      return;
+    }
+    if (request.method === "DELETE" && url.pathname === "/session/session-1") {
+      deletedSession = true;
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ deleted: true }));
       return;
     }
     if (request.method === "POST" && url.pathname === "/session/session-1/message") {
@@ -141,6 +148,13 @@ test("OpenCode executor creates a worktree, streams events, and returns usage", 
   assert(directories.some((directory) => directory.includes("worktrees")));
   assert.match(result.workingDirectory, /worktrees/);
   assert.match(await readFile(path.join(result.workingDirectory, "README.md"), "utf8"), /fixture/);
+  await executor.cleanup({
+    ...database.getSession(job.sessionKey)!,
+    openCodeSessionId: result.openCodeSessionId,
+    workingDirectory: result.workingDirectory,
+  });
+  assert.equal(deletedSession, true);
+  await assert.rejects(readFile(result.workingDirectory, "utf8"), /ENOENT/);
 
   await audit.flush();
   database.close();
