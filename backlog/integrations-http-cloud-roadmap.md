@@ -179,6 +179,28 @@ This milestone should preserve user-visible behavior. Complete its contracts bef
 
 Depends on Milestone 1. Only one Slack ingress transport should be enabled in a process at a time; intentionally running both would receive duplicate Slack events and is not an MVP requirement.
 
+### M2 security and framework decision
+
+Use Slack Bolt's built-in `HTTPReceiver`, backed by Node's native HTTP server, for the Slack Events API endpoint. Do not add Express, Fastify, or NestJS for this milestone. Bolt is already a direct dependency and owns the Slack-specific raw-body verification and acknowledgement lifecycle. Reconsider Fastify only if the process later becomes a shared HTTP gateway for multiple platforms and operational APIs.
+
+Bolt's receiver is the application-authentication layer, not the entire public-edge security boundary. With signature verification enabled, it buffers the original body, validates `X-Slack-Signature` using the app signing secret, enforces request timestamp freshness, performs a timing-resistant signature comparison, and handles Slack URL verification. This is sufficient to authenticate Slack requests when used as documented, but it does not provide complete denial-of-service, request-size, TLS, or application-authorization controls.
+
+The production request path must be:
+
+```text
+Internet
+  -> managed TLS endpoint / reverse proxy
+  -> edge request limits and rate controls
+  -> private Slack Bolt HTTPReceiver
+  -> workspace/user/event authorization
+  -> durable event deduplication and orchestration
+```
+
+References:
+
+- [Slack request verification](https://docs.slack.dev/authentication/verifying-requests-from-slack)
+- [Slack Events API acknowledgement and retry behavior](https://docs.slack.dev/apis/events-api/)
+
 ### M2-A: HTTPS receiver and authenticity
 
 **Primary files:** Slack ingress/composition code, configuration/secrets, HTTP ingress tests.
@@ -186,6 +208,8 @@ Depends on Milestone 1. Only one Slack ingress transport should be enabled in a 
 - [ ] Add the Slack Events API receiver using Slack Bolt's supported HTTP receiver unless a concrete limitation requires a custom server.
 - [ ] Verify Slack signatures against the unmodified raw request body and `SLACK_SIGNING_SECRET`.
 - [ ] Enforce Slack's request timestamp freshness/replay protection through the receiver or explicit validation.
+- [ ] Keep Bolt signature verification explicitly enabled in production; never disable it merely because a load balancer or reverse proxy is present.
+- [ ] Validate the expected Slack app ID, workspace, user, event type, DM context, and bot/subtype rules after request authentication. A valid Slack signature proves origin, not user authorization.
 - [ ] Support Slack URL-verification challenges.
 - [ ] Expose a dedicated health endpoint that does not reveal configuration or secret state.
 - [ ] Configure host/port/path explicitly for reverse-proxy or load-balancer deployment.
@@ -232,6 +256,30 @@ Depends on Milestone 1. Only one Slack ingress transport should be enabled in a 
 - HTTPS signature, timestamp, challenge, retry, and fast-ack tests pass without live Slack credentials.
 - Socket Mode still passes its existing tests and manual run path.
 - Documentation makes clear that Slack incoming webhooks are not used for inbound events.
+
+### M2-D: Public endpoint hardening
+
+**Primary files:** deployment configuration, HTTP ingress tests, security and operator documentation.
+
+- [ ] Terminate TLS at a managed load balancer or hardened reverse proxy; do not directly expose the Node receiver to the internet.
+- [ ] Make the Bolt service reachable only from that trusted edge component.
+- [ ] Publicly route only `POST /slack/events` and a minimal health endpoint. Return no configuration, dependency, credential, or detailed failure data from health checks.
+- [ ] Enforce request-body, header, connection, and request-time limits before Bolt buffers the body. Slack event payloads contain file metadata rather than attachment binaries, so determine a small bound from representative payload tests.
+- [ ] Add edge rate limiting and, for AWS, evaluate AWS WAF rules for malformed/flood traffic. Slack signatures remain the source-authentication mechanism; do not depend on source IP allowlisting as a substitute.
+- [ ] Keep system time synchronized because request freshness validation depends on it.
+- [ ] Store the signing secret in the existing protected bundle or cloud secret manager, exclude it from logs and OpenCode's environment, and document rotation.
+- [ ] Ensure rejected signatures and malformed requests cannot cause unbounded log volume or leak request bodies, signatures, prompts, tokens, or attachment metadata.
+- [ ] Keep Node and `@slack/bolt` on supported, patched versions and include them in dependency-vulnerability monitoring.
+- [ ] Test valid signatures, invalid signatures, stale timestamps, malformed JSON, wrong methods/paths, oversized bodies, slow requests, duplicate events, retry headers, and unauthorized but validly signed workspace/user events.
+
+**Acceptance criteria**
+
+- The internet cannot directly address the Node receiver in the production topology.
+- Oversized and rate-limited traffic is rejected before Bolt buffers or processes it.
+- Invalid or stale requests create no jobs and produce no Slack API calls.
+- Validly signed but unauthorized events create no jobs.
+- Duplicate valid events create one job and at most one initial reply.
+- Edge and application logs contain no request bodies or secret material.
 
 ## Milestone 3 — Single-node AWS lift
 
