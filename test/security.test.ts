@@ -126,6 +126,16 @@ test("OpenCode launcher is wired only to the worker secret bundle", async () => 
   assert.match(gatewayService, /NT SERVICE\\AgentRunner/);
 });
 
+test("Slack manifest includes files:read for screenshot support", async () => {
+  const manifest = await readFile("slack/manifest.json", "utf8");
+  const parsed = JSON.parse(manifest) as { oauth_config: { scopes: { bot: string[] } } };
+  const botScopes = parsed.oauth_config.scopes.bot;
+  assert(botScopes.includes("files:read"));
+  assert(botScopes.includes("assistant:write"));
+  assert(botScopes.includes("chat:write"));
+  assert(botScopes.includes("im:history"));
+});
+
 test("gateway child processes receive an allowlisted environment without secrets", () => {
   const child = unprivilegedChildEnvironment({
     PATH: "trusted-path",

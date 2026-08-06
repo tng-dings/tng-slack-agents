@@ -9,7 +9,7 @@ import { RunnerDatabase } from "../src/database.js";
 import { AuthorizationError } from "../src/errors.js";
 import { AgentRunner } from "../src/runner.js";
 import { SlackJobReporter } from "../src/slack.js";
-import type { Executor, JobRecord, JobReporter } from "../src/types.js";
+import type { Attachment, Executor, JobRecord, JobReporter } from "../src/types.js";
 import { testConfig, waitFor } from "./helpers.js";
 
 test("runner persists jobs and sessions, enforces authz, accounts usage, and redacts audits", async () => {
@@ -128,6 +128,73 @@ test("runner marks an in-flight job failed after restart instead of replaying it
   await rm(root, { recursive: true, force: true });
 });
 
+test("runner persists attachments and passes them to the executor", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-attachments-"));
+  const config = testConfig(root);
+  const database = new RunnerDatabase(config.storage.databasePath);
+  const audit = new AuditLogger(config.storage.auditLogPath, database, ["secret"]);
+  let capturedAttachments: Attachment[] | undefined;
+  const executor: Executor = {
+    execute: async (job, _session, callbacks) => {
+      capturedAttachments = job.attachments;
+      await callbacks.onText("done");
+      await callbacks.onUsage({ cost: 0.1, inputTokens: 5, outputTokens: 1 });
+      return { output: "done", usage: { cost: 0.1, inputTokens: 5, outputTokens: 1 }, openCodeSessionId: "s1", workingDirectory: root };
+    },
+  };
+  const runner = new AgentRunner(config, database, executor, audit, () => ({
+    start: async () => undefined,
+    append: async () => undefined,
+    succeed: async () => undefined,
+    fail: async () => undefined,
+  }));
+  await runner.start();
+  const attachment: Attachment = { mime: "image/png", filename: "screenshot.png", dataUrl: "data:image/png;base64,iVBOR" };
+  const { job } = await runner.submit({
+    sourceEventId: "attach-event-1",
+    workspaceId: "T1",
+    channelId: "D1",
+    threadTs: "300.1",
+    userId: "U_ALLOWED",
+    prompt: "Review this screenshot",
+    attachments: [attachment],
+  });
+  await waitFor(() => database.getJob(job.id)?.status === "succeeded");
+  assert.deepEqual(capturedAttachments, [attachment]);
+  const stored = database.getJob(job.id);
+  assert.equal(stored?.attachments.length, 1);
+  assert.equal(stored?.attachments[0]?.filename, "screenshot.png");
+  await runner.stop();
+  database.close();
+  await rm(root, { recursive: true, force: true });
+});
+
+test("runner rejects jobs exceeding the attachment count limit", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-attach-limit-"));
+  const config = testConfig(root);
+  config.limits.maxAttachmentsPerJob = 1;
+  const database = new RunnerDatabase(config.storage.databasePath);
+  const audit = new AuditLogger(config.storage.auditLogPath, database);
+  const runner = new AgentRunner(config, database, { execute: async () => Promise.reject(new Error("must not execute")) }, audit, () => ({
+    start: async () => undefined,
+    append: async () => undefined,
+    succeed: async () => undefined,
+    fail: async () => undefined,
+  }));
+  await runner.start();
+  const attachments: Attachment[] = [
+    { mime: "image/png", filename: "a.png", dataUrl: "data:image/png;base64,AAA" },
+    { mime: "image/png", filename: "b.png", dataUrl: "data:image/png;base64,BBB" },
+  ];
+  await assert.rejects(
+    runner.submit({ sourceEventId: "attach-limit", workspaceId: "T1", channelId: "D1", threadTs: "400.1", userId: "U_ALLOWED", prompt: "too many", attachments }),
+    /attachment count/i,
+  );
+  await runner.stop();
+  database.close();
+  await rm(root, { recursive: true, force: true });
+});
+
 test("Slack reporter uses native streaming with the correct destination", async () => {
   const calls: Array<{ kind: string; value: unknown }> = [];
   const fakeClient = {
@@ -168,6 +235,7 @@ test("Slack reporter uses native streaming with the correct destination", async 
     replyTs: "1.1",
     userId: "U1",
     prompt: "hello",
+    attachments: [],
     status: "running",
     output: "",
     error: null,

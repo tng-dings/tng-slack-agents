@@ -24,6 +24,8 @@ export function testConfig(root: string): RunnerConfig {
       maxOutputCharacters: 100_000,
       maxAuditEventCharacters: 32_000,
       maxToolEventsPerJob: 500,
+      maxAttachmentsPerJob: 4,
+      maxAttachmentBytes: 5_000_000,
     },
     storage: {
       databasePath: `${root}/runner.db`,
