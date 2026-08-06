@@ -19,7 +19,9 @@
     "maxPromptCharacters": 12000,
     "maxOutputCharacters": 100000,
     "maxAuditEventCharacters": 32000,
-    "maxToolEventsPerJob": 500
+    "maxToolEventsPerJob": 500,
+    "maxAttachmentsPerJob": 4,
+    "maxAttachmentBytes": 5000000
   },
   "storage": {
     "databasePath": "data/agent-runner.db",

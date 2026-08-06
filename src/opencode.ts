@@ -85,9 +85,11 @@ export class OpenCodeExecutor implements Executor {
     const eventSubscription = await this.subscribe(openCodeSessionId, workingDirectory, callbacks, eventController);
 
     try {
-      const body: JsonObject = {
-        parts: [{ type: "text", text: job.prompt }],
-      };
+      const parts: JsonObject[] = [{ type: "text", text: job.prompt }];
+      for (const attachment of job.attachments) {
+        parts.push({ type: "file", mime: attachment.mime, filename: attachment.filename, url: attachment.dataUrl });
+      }
+      const body: JsonObject = { parts };
       if (this.config.model) body.model = this.config.model;
       const response = await this.request(
         `/session/${encodeURIComponent(openCodeSessionId)}/message`,

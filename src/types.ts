@@ -6,6 +6,12 @@ export type JobStatus =
   | "timed_out"
   | "rejected";
 
+export interface Attachment {
+  mime: string;
+  filename: string;
+  dataUrl: string;
+}
+
 export interface JobRecord {
   id: string;
   sourceEventId: string;
@@ -16,6 +22,7 @@ export interface JobRecord {
   replyTs: string | null;
   userId: string;
   prompt: string;
+  attachments: Attachment[];
   status: JobStatus;
   output: string;
   error: string | null;
@@ -46,6 +53,7 @@ export interface JobSubmission {
   replyTs?: string;
   userId: string;
   prompt: string;
+  attachments?: Attachment[];
 }
 
 export interface Usage {

@@ -4,6 +4,7 @@ import type { RunnerConfig } from "./config.js";
 import type { RunnerDatabase } from "./database.js";
 import { AuthorizationError, LimitError, RunnerError, TimeoutError } from "./errors.js";
 import type {
+  Attachment,
   Executor,
   JobRecord,
   JobReporter,
@@ -17,6 +18,19 @@ const emptyUsage = (): Usage => ({ cost: 0, inputTokens: 0, outputTokens: 0 });
 
 function contentMetadata(value: string): { characters: number; sha256: string } {
   return { characters: value.length, sha256: createHash("sha256").update(value).digest("hex") };
+}
+
+function attachmentMetadata(attachments: Attachment[]): { count: number; totalBytes: number; items: { filename: string; mime: string; bytes: number; sha256: string }[] } {
+  return {
+    count: attachments.length,
+    totalBytes: attachments.reduce((sum, a) => sum + Buffer.byteLength(a.dataUrl, "utf8"), 0),
+    items: attachments.map((a) => ({
+      filename: a.filename,
+      mime: a.mime,
+      bytes: Buffer.byteLength(a.dataUrl, "utf8"),
+      sha256: createHash("sha256").update(a.dataUrl).digest("hex"),
+    })),
+  };
 }
 
 function toolMetadata(value: unknown): Record<string, unknown> {
@@ -94,7 +108,16 @@ export class AgentRunner {
     if (prompt.length > this.config.limits.maxPromptCharacters) {
       throw new LimitError("The prompt exceeds the configured character limit.", "PROMPT_LIMIT");
     }
-    const normalized = { ...submission, prompt };
+    const attachments = submission.attachments ?? [];
+    if (attachments.length > this.config.limits.maxAttachmentsPerJob) {
+      throw new LimitError("The request exceeds the configured attachment count limit.", "ATTACHMENT_COUNT_LIMIT");
+    }
+    for (const attachment of attachments) {
+      if (Buffer.byteLength(attachment.dataUrl, "utf8") > this.config.limits.maxAttachmentBytes) {
+        throw new LimitError("An attachment exceeds the configured size limit.", "ATTACHMENT_SIZE_LIMIT");
+      }
+    }
+    const normalized = { ...submission, prompt, attachments };
     const rejection = this.rejectionFor(normalized);
     if (rejection) {
       await this.audit.log(
@@ -107,7 +130,7 @@ export class AgentRunner {
     const job = this.database.insertJob(randomUUID(), normalized);
     await this.audit.log(
       "job_queued",
-      { prompt: contentMetadata(prompt), workspaceId: job.workspaceId, channelId: job.channelId, threadTs: job.threadTs },
+      { prompt: contentMetadata(prompt), attachments: attachmentMetadata(attachments), workspaceId: job.workspaceId, channelId: job.channelId, threadTs: job.threadTs },
       this.context(job),
     );
     try {

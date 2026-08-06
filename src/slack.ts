@@ -2,7 +2,7 @@ import { App, type AllMiddlewareArgs, type SlackEventMiddlewareArgs } from "@sla
 import type { WebClient } from "@slack/web-api";
 import type { RunnerConfig, RunnerSecrets } from "./config.js";
 import type { AgentRunner } from "./runner.js";
-import type { JobRecord, JobReporter } from "./types.js";
+import type { Attachment, JobRecord, JobReporter } from "./types.js";
 import { RunnerError } from "./errors.js";
 import { redactString } from "./audit.js";
 
@@ -10,6 +10,8 @@ interface SlackStream {
   append(input: { markdown_text: string }): Promise<unknown>;
   stop(input?: { markdown_text?: string }): Promise<unknown>;
 }
+
+const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 
 function messageText(output: string, secrets: string[]): string {
   const limit = 39_000;
@@ -133,6 +135,7 @@ export class SlackGateway {
   private readonly allowedUsers: Set<string>;
   private readonly denialTimes = new Map<string, number>();
   private readonly outputSecrets: string[];
+  private readonly botToken: string;
 
   constructor(
     private readonly config: RunnerConfig,
@@ -142,6 +145,7 @@ export class SlackGateway {
     this.allowedWorkspaces = new Set(config.slack.allowedWorkspaceIds);
     this.allowedUsers = new Set(config.slack.allowedUserIds);
     this.outputSecrets = [secrets.openCodePassword, secrets.slackBotToken, secrets.slackAppToken];
+    this.botToken = secrets.slackBotToken;
     this.app = new App({
       token: secrets.slackBotToken,
       appToken: secrets.slackAppToken,
@@ -175,17 +179,23 @@ export class SlackGateway {
   private registerListeners(): void {
     this.app.message(async ({ message, client, body }) => {
       const event = message as unknown as Record<string, unknown>;
-      if (event.channel_type !== "im" || typeof event.user !== "string" || typeof event.text !== "string") return;
+      if (event.channel_type !== "im" || typeof event.user !== "string") return;
       if (event.bot_id || event.subtype) return;
       if (!this.runner) throw new Error("Slack gateway received a message before the runner was attached");
       const channelId = String(event.channel);
       const eventTs = String(event.ts);
       const threadTs = typeof event.thread_ts === "string" ? event.thread_ts : eventTs;
       const workspaceId = typeof event.team === "string" ? event.team : String((body as { team_id?: string }).team_id ?? "");
+      const text = typeof event.text === "string" ? event.text : "";
+      const rawFiles = Array.isArray(event.files) ? event.files : [];
+      if (!text.trim() && rawFiles.length === 0) return;
       if (!this.allowedWorkspaces.has(workspaceId) || !this.allowedUsers.has(event.user)) {
         await this.postDenial(client, workspaceId, event.user, channelId, threadTs);
         return;
       }
+      const attachments = await this.downloadAttachments(rawFiles);
+      const prompt = text.trim() || (attachments.length > 0 ? "Please review the attached screenshot(s)." : "");
+      if (!prompt) return;
       const eventId = (body as { event_id?: unknown }).event_id;
       const sourceEventId = typeof eventId === "string" && eventId ? eventId : `${workspaceId}:${channelId}:${eventTs}`;
       try {
@@ -195,11 +205,12 @@ export class SlackGateway {
           channelId,
           threadTs,
           userId: event.user,
-          prompt: event.text,
+          prompt,
+          attachments,
         });
       } catch (error) {
-        const message = error instanceof RunnerError ? error.message : "The agent runner could not queue this request.";
-        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: message }).catch(() => undefined);
+        const errorMessage = error instanceof RunnerError ? error.message : "The agent runner could not queue this request.";
+        await client.chat.postMessage({ channel: channelId, thread_ts: threadTs, text: errorMessage }).catch(() => undefined);
       }
     });
 
@@ -237,5 +248,40 @@ export class SlackGateway {
       thread_ts: threadTs,
       text: "You are not authorized to use this agent.",
     }).catch(() => undefined);
+  }
+
+  private async downloadAttachments(files: unknown[]): Promise<Attachment[]> {
+    const maxCount = this.config.limits.maxAttachmentsPerJob;
+    const maxBytes = this.config.limits.maxAttachmentBytes;
+    const attachments: Attachment[] = [];
+    for (const file of files) {
+      if (attachments.length >= maxCount) break;
+      if (typeof file !== "object" || file === null) continue;
+      const f = file as Record<string, unknown>;
+      const mime = typeof f.mimetype === "string" ? f.mimetype : "";
+      if (!IMAGE_MIME_TYPES.has(mime)) continue;
+      const url =
+        typeof f.url_private_download === "string" ? f.url_private_download :
+        typeof f.url_private === "string" ? f.url_private : "";
+      if (!url) continue;
+      const size = typeof f.size === "number" ? f.size : 0;
+      if (size > maxBytes) continue;
+      const filename = typeof f.name === "string" ? f.name : "attachment";
+      try {
+        const response = await fetch(url, {
+          headers: { Authorization: `Bearer ${this.botToken}` },
+          signal: AbortSignal.timeout(30_000),
+        });
+        if (!response.ok) continue;
+        const buffer = await response.arrayBuffer();
+        const bytes = buffer.byteLength;
+        if (bytes > maxBytes) continue;
+        const base64 = Buffer.from(buffer).toString("base64");
+        attachments.push({ mime, filename, dataUrl: `data:${mime};base64,${base64}` });
+      } catch {
+        // skip failed downloads
+      }
+    }
+    return attachments;
   }
 }

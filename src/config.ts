@@ -25,6 +25,8 @@ export interface RunnerConfig {
     maxOutputCharacters: number;
     maxAuditEventCharacters: number;
     maxToolEventsPerJob: number;
+    maxAttachmentsPerJob: number;
+    maxAttachmentBytes: number;
   };
   storage: {
     databasePath: string;
@@ -54,6 +56,8 @@ const defaults = {
   maxOutputCharacters: 100_000,
   maxAuditEventCharacters: 32_000,
   maxToolEventsPerJob: 500,
+  maxAttachmentsPerJob: 4,
+  maxAttachmentBytes: 5_000_000,
   retentionDays: 30,
   pollIntervalMs: 250,
 } as const;
@@ -157,6 +161,8 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
       maxOutputCharacters: positiveInteger(limits.maxOutputCharacters, defaults.maxOutputCharacters, "limits.maxOutputCharacters"),
       maxAuditEventCharacters: positiveInteger(limits.maxAuditEventCharacters, defaults.maxAuditEventCharacters, "limits.maxAuditEventCharacters"),
       maxToolEventsPerJob: positiveInteger(limits.maxToolEventsPerJob, defaults.maxToolEventsPerJob, "limits.maxToolEventsPerJob"),
+      maxAttachmentsPerJob: positiveInteger(limits.maxAttachmentsPerJob, defaults.maxAttachmentsPerJob, "limits.maxAttachmentsPerJob"),
+      maxAttachmentBytes: positiveNumber(limits.maxAttachmentBytes, defaults.maxAttachmentBytes, "limits.maxAttachmentBytes"),
     },
     storage: {
       databasePath: resolvePath(storage.databasePath, "storage.databasePath", baseDirectory),

@@ -1,12 +1,29 @@
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import type { JobRecord, JobStatus, JobSubmission, SessionRecord, Usage } from "./types.js";
+import type { Attachment, JobRecord, JobStatus, JobSubmission, SessionRecord, Usage } from "./types.js";
 
 type Row = Record<string, unknown>;
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function parseAttachments(value: unknown): Attachment[] {
+  if (!value || typeof value !== "string") return [];
+  try {
+    const parsed: unknown = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (item): item is Attachment =>
+        typeof item === "object" && item !== null &&
+        typeof (item as Record<string, unknown>).mime === "string" &&
+        typeof (item as Record<string, unknown>).filename === "string" &&
+        typeof (item as Record<string, unknown>).dataUrl === "string",
+    );
+  } catch {
+    return [];
+  }
 }
 
 function mapJob(row: Row): JobRecord {
@@ -20,6 +37,7 @@ function mapJob(row: Row): JobRecord {
     replyTs: row.reply_ts === null ? null : String(row.reply_ts),
     userId: String(row.user_id),
     prompt: String(row.prompt),
+    attachments: parseAttachments(row.attachments),
     status: String(row.status) as JobStatus,
     output: String(row.output ?? ""),
     error: row.error === null ? null : String(row.error),
@@ -78,6 +96,7 @@ export class RunnerDatabase {
         reply_ts TEXT,
         user_id TEXT NOT NULL,
         prompt TEXT NOT NULL,
+        attachments TEXT,
         status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','timed_out','rejected')),
         output TEXT NOT NULL DEFAULT '',
         error TEXT,
@@ -112,6 +131,12 @@ export class RunnerDatabase {
         payload_json TEXT NOT NULL
       );
     `);
+
+    // Migrate pre-attachment databases
+    const columns = this.sqlite.prepare("PRAGMA table_info(jobs)").all() as Row[];
+    if (!columns.some((col) => String(col.name) === "attachments")) {
+      this.sqlite.exec("ALTER TABLE jobs ADD COLUMN attachments TEXT");
+    }
   }
 
   close(): void {
@@ -159,11 +184,12 @@ export class RunnerDatabase {
   insertJob(id: string, submission: JobSubmission, status: JobStatus = "queued", error: string | null = null): JobRecord {
     const session = this.ensureSession(submission);
     const timestamp = now();
+    const attachments = submission.attachments ?? [];
     this.sqlite.prepare(`
       INSERT INTO jobs(
         id, source_event_id, session_key, workspace_id, channel_id, thread_ts, reply_ts,
-        user_id, prompt, status, error, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        user_id, prompt, attachments, status, error, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `).run(
       id,
       submission.sourceEventId,
@@ -174,6 +200,7 @@ export class RunnerDatabase {
       submission.replyTs ?? null,
       submission.userId,
       submission.prompt,
+      attachments.length > 0 ? (JSON.stringify(attachments) as SQLInputValue) : null,
       status,
       error,
       timestamp,
@@ -242,10 +269,12 @@ export class RunnerDatabase {
   ): void {
     this.transaction(() => {
       this.sqlite.prepare(`
-        UPDATE jobs SET status = ?, prompt = CASE WHEN ? THEN prompt ELSE '' END, output = ?, error = ?,
+        UPDATE jobs SET status = ?, prompt = CASE WHEN ? THEN prompt ELSE '' END,
+          attachments = CASE WHEN ? THEN attachments ELSE NULL END,
+          output = ?, error = ?,
           cost = ?, input_tokens = ?, output_tokens = ?, finished_at = ?
         WHERE id = ?
-      `).run(status, retainContent ? 1 : 0, retainContent ? output : "", error, usage.cost, usage.inputTokens, usage.outputTokens, now(), id);
+      `).run(status, retainContent ? 1 : 0, retainContent ? 1 : 0, retainContent ? output : "", error, usage.cost, usage.inputTokens, usage.outputTokens, now(), id);
       if (usage.cost || usage.inputTokens || usage.outputTokens) {
         const job = this.getJob(id)!;
         this.sqlite.prepare(`
@@ -295,10 +324,11 @@ export class RunnerDatabase {
     if (rows.length) {
       this.sqlite.prepare(`
         UPDATE jobs SET status = 'failed', prompt = CASE WHEN ? THEN prompt ELSE '' END,
+          attachments = CASE WHEN ? THEN attachments ELSE NULL END,
           output = CASE WHEN ? THEN output ELSE '' END,
           error = 'Runner restarted while this job was executing', finished_at = ?
         WHERE status = 'running'
-      `).run(retainContent ? 1 : 0, retainContent ? 1 : 0, now());
+      `).run(retainContent ? 1 : 0, retainContent ? 1 : 0, retainContent ? 1 : 0, now());
     }
     return rows.map(mapJob);
   }
