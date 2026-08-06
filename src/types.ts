@@ -12,15 +12,18 @@ export interface Attachment {
   dataUrl: string;
 }
 
+export type IntegrationId = "slack" | "discord" | "local";
+
 export interface JobRecord {
   id: string;
+  integration: IntegrationId;
   sourceEventId: string;
   sessionKey: string;
-  workspaceId: string;
-  channelId: string;
-  threadTs: string;
+  tenantId: string;
+  conversationId: string;
+  threadId: string;
   replyTs: string | null;
-  userId: string;
+  actorId: string;
   prompt: string;
   attachments: Attachment[];
   status: JobStatus;
@@ -36,9 +39,10 @@ export interface JobRecord {
 
 export interface SessionRecord {
   sessionKey: string;
-  workspaceId: string;
-  channelId: string;
-  threadTs: string;
+  integration: IntegrationId;
+  tenantId: string;
+  conversationId: string;
+  threadId: string;
   openCodeSessionId: string | null;
   workingDirectory: string | null;
   createdAt: string;
@@ -46,12 +50,13 @@ export interface SessionRecord {
 }
 
 export interface JobSubmission {
+  integration: IntegrationId;
   sourceEventId: string;
-  workspaceId: string;
-  channelId: string;
-  threadTs: string;
+  tenantId: string;
+  conversationId: string;
+  threadId: string;
   replyTs?: string;
-  userId: string;
+  actorId: string;
   prompt: string;
   attachments?: Attachment[];
 }

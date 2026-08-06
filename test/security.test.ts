@@ -59,11 +59,12 @@ test("Slack delivery failure cannot change a successful execution result", async
   const runner = new AgentRunner(config, database, executor, audit, () => reporter);
   await runner.start();
   const { job } = await runner.submit({
+    integration: "slack",
     sourceEventId: "delivery-event",
-    workspaceId: "T1",
-    channelId: "D1",
-    threadTs: "1.0",
-    userId: "U_ALLOWED",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "1.0",
+    actorId: "U_ALLOWED",
     prompt: "work",
   });
   await waitFor(() => database.getJob(job.id)?.status === "succeeded");
@@ -95,11 +96,12 @@ test("runner enforces the configured output bound", async () => {
   const runner = new AgentRunner(config, database, executor, audit, () => reporter);
   await runner.start();
   const { job } = await runner.submit({
+    integration: "slack",
     sourceEventId: "output-limit-event",
-    workspaceId: "T1",
-    channelId: "D1",
-    threadTs: "2.0",
-    userId: "U_ALLOWED",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "2.0",
+    actorId: "U_ALLOWED",
     prompt: "produce output",
   });
   await waitFor(() => database.getJob(job.id)?.status === "failed");

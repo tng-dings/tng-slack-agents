@@ -1,7 +1,7 @@
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import type { Attachment, JobRecord, JobStatus, JobSubmission, SessionRecord, Usage } from "./types.js";
+import type { Attachment, IntegrationId, JobRecord, JobStatus, JobSubmission, SessionRecord, Usage } from "./types.js";
 
 type Row = Record<string, unknown>;
 
@@ -27,15 +27,18 @@ function parseAttachments(value: unknown): Attachment[] {
 }
 
 function mapJob(row: Row): JobRecord {
+  const integration = String(row.integration) as IntegrationId;
+  const sourceEventKey = String(row.source_event_id);
   return {
     id: String(row.id),
-    sourceEventId: String(row.source_event_id),
+    integration,
+    sourceEventId: sourceEventKey.startsWith(`${integration}:`) ? sourceEventKey.slice(integration.length + 1) : sourceEventKey,
     sessionKey: String(row.session_key),
-    workspaceId: String(row.workspace_id),
-    channelId: String(row.channel_id),
-    threadTs: String(row.thread_ts),
+    tenantId: String(row.tenant_id),
+    conversationId: String(row.conversation_id),
+    threadId: String(row.thread_id),
     replyTs: row.reply_ts === null ? null : String(row.reply_ts),
-    userId: String(row.user_id),
+    actorId: String(row.actor_id),
     prompt: String(row.prompt),
     attachments: parseAttachments(row.attachments),
     status: String(row.status) as JobStatus,
@@ -53,9 +56,10 @@ function mapJob(row: Row): JobRecord {
 function mapSession(row: Row): SessionRecord {
   return {
     sessionKey: String(row.session_key),
-    workspaceId: String(row.workspace_id),
-    channelId: String(row.channel_id),
-    threadTs: String(row.thread_ts),
+    integration: String(row.integration) as IntegrationId,
+    tenantId: String(row.tenant_id),
+    conversationId: String(row.conversation_id),
+    threadId: String(row.thread_id),
     openCodeSessionId: row.opencode_session_id === null ? null : String(row.opencode_session_id),
     workingDirectory: row.working_directory === null ? null : String(row.working_directory),
     createdAt: String(row.created_at),
@@ -77,6 +81,10 @@ export class RunnerDatabase {
     this.sqlite.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         session_key TEXT PRIMARY KEY,
+        integration TEXT NOT NULL DEFAULT 'slack',
+        tenant_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
         workspace_id TEXT NOT NULL,
         channel_id TEXT NOT NULL,
         thread_ts TEXT NOT NULL,
@@ -90,6 +98,11 @@ export class RunnerDatabase {
         id TEXT PRIMARY KEY,
         source_event_id TEXT NOT NULL UNIQUE,
         session_key TEXT NOT NULL REFERENCES sessions(session_key),
+        integration TEXT NOT NULL DEFAULT 'slack',
+        tenant_id TEXT NOT NULL,
+        conversation_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        actor_id TEXT NOT NULL,
         workspace_id TEXT NOT NULL,
         channel_id TEXT NOT NULL,
         thread_ts TEXT NOT NULL,
@@ -132,11 +145,45 @@ export class RunnerDatabase {
       );
     `);
 
-    // Migrate pre-attachment databases
-    const columns = this.sqlite.prepare("PRAGMA table_info(jobs)").all() as Row[];
-    if (!columns.some((col) => String(col.name) === "attachments")) {
+    const jobColumns = this.sqlite.prepare("PRAGMA table_info(jobs)").all() as Row[];
+    if (!jobColumns.some((col) => String(col.name) === "attachments")) {
       this.sqlite.exec("ALTER TABLE jobs ADD COLUMN attachments TEXT");
     }
+
+    // Existing databases predate integration-aware identities. Keep the legacy
+    // columns for an additive upgrade, while making normalized columns and keys
+    // authoritative for all new reads and writes.
+    if (!jobColumns.some((col) => String(col.name) === "integration")) {
+      this.sqlite.exec(`
+        ALTER TABLE sessions ADD COLUMN integration TEXT NOT NULL DEFAULT 'slack';
+        ALTER TABLE sessions ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE sessions ADD COLUMN conversation_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE sessions ADD COLUMN thread_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE jobs ADD COLUMN integration TEXT NOT NULL DEFAULT 'slack';
+        ALTER TABLE jobs ADD COLUMN tenant_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE jobs ADD COLUMN conversation_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE jobs ADD COLUMN thread_id TEXT NOT NULL DEFAULT '';
+        ALTER TABLE jobs ADD COLUMN actor_id TEXT NOT NULL DEFAULT '';
+      `);
+      this.transaction(() => {
+        this.sqlite.exec(`
+          PRAGMA defer_foreign_keys = ON;
+          UPDATE sessions SET
+            tenant_id = workspace_id,
+            conversation_id = channel_id,
+            thread_id = thread_ts,
+            session_key = 'slack:' || session_key;
+          UPDATE jobs SET
+            source_event_id = 'slack:' || source_event_id,
+            session_key = 'slack:' || session_key,
+            tenant_id = workspace_id,
+            conversation_id = channel_id,
+            thread_id = thread_ts,
+            actor_id = user_id;
+        `);
+      });
+    }
+    this.sqlite.exec("CREATE INDEX IF NOT EXISTS jobs_actor_status_idx ON jobs(actor_id, status)");
   }
 
   close(): void {
@@ -155,14 +202,27 @@ export class RunnerDatabase {
     }
   }
 
-  ensureSession(submission: Pick<JobSubmission, "workspaceId" | "channelId" | "threadTs">): SessionRecord {
-    const sessionKey = `${submission.workspaceId}:${submission.channelId}:${submission.threadTs}`;
+  ensureSession(submission: Pick<JobSubmission, "integration" | "tenantId" | "conversationId" | "threadId">): SessionRecord {
+    const sessionKey = `${submission.integration}:${submission.tenantId}:${submission.conversationId}:${submission.threadId}`;
     const timestamp = now();
     this.sqlite.prepare(`
-      INSERT INTO sessions(session_key, workspace_id, channel_id, thread_ts, created_at, updated_at)
-      VALUES (?, ?, ?, ?, ?, ?)
+      INSERT INTO sessions(
+        session_key, integration, tenant_id, conversation_id, thread_id,
+        workspace_id, channel_id, thread_ts, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       ON CONFLICT(session_key) DO UPDATE SET updated_at = excluded.updated_at
-    `).run(sessionKey, submission.workspaceId, submission.channelId, submission.threadTs, timestamp, timestamp);
+    `).run(
+      sessionKey,
+      submission.integration,
+      submission.tenantId,
+      submission.conversationId,
+      submission.threadId,
+      submission.tenantId,
+      submission.conversationId,
+      submission.threadId,
+      timestamp,
+      timestamp,
+    );
     return this.getSession(sessionKey)!;
   }
 
@@ -182,30 +242,37 @@ export class RunnerDatabase {
   }
 
   insertJob(id: string, submission: JobSubmission, status: JobStatus = "queued", error: string | null = null): JobRecord {
-    const session = this.ensureSession(submission);
-    const timestamp = now();
-    const attachments = submission.attachments ?? [];
-    this.sqlite.prepare(`
-      INSERT INTO jobs(
-        id, source_event_id, session_key, workspace_id, channel_id, thread_ts, reply_ts,
-        user_id, prompt, attachments, status, error, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `).run(
-      id,
-      submission.sourceEventId,
-      session.sessionKey,
-      submission.workspaceId,
-      submission.channelId,
-      submission.threadTs,
-      submission.replyTs ?? null,
-      submission.userId,
-      submission.prompt,
-      attachments.length > 0 ? (JSON.stringify(attachments) as SQLInputValue) : null,
-      status,
-      error,
-      timestamp,
-    );
-    return this.getJob(id)!;
+    return this.transaction(() => {
+      const session = this.ensureSession(submission);
+      const timestamp = now();
+      const attachments = submission.attachments ?? [];
+      this.sqlite.prepare(`
+        INSERT INTO jobs(
+          id, source_event_id, session_key, integration, tenant_id, conversation_id, thread_id, actor_id,
+          workspace_id, channel_id, thread_ts, reply_ts, user_id, prompt, attachments, status, error, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `).run(
+        id,
+        `${submission.integration}:${submission.sourceEventId}`,
+        session.sessionKey,
+        submission.integration,
+        submission.tenantId,
+        submission.conversationId,
+        submission.threadId,
+        submission.actorId,
+        submission.tenantId,
+        submission.conversationId,
+        submission.threadId,
+        submission.replyTs ?? null,
+        submission.actorId,
+        submission.prompt,
+        attachments.length > 0 ? (JSON.stringify(attachments) as SQLInputValue) : null,
+        status,
+        error,
+        timestamp,
+      );
+      return this.getJob(id)!;
+    });
   }
 
   getJob(id: string): JobRecord | undefined {
@@ -213,13 +280,13 @@ export class RunnerDatabase {
     return row ? mapJob(row) : undefined;
   }
 
-  getJobBySourceEvent(sourceEventId: string): JobRecord | undefined {
-    const row = this.sqlite.prepare("SELECT * FROM jobs WHERE source_event_id = ?").get(sourceEventId) as Row | undefined;
+  getJobBySourceEvent(integration: IntegrationId, sourceEventId: string): JobRecord | undefined {
+    const row = this.sqlite.prepare("SELECT * FROM jobs WHERE source_event_id = ?").get(`${integration}:${sourceEventId}`) as Row | undefined;
     return row ? mapJob(row) : undefined;
   }
 
-  countJobs(userId: string, status: JobStatus): number {
-    const row = this.sqlite.prepare("SELECT COUNT(*) AS count FROM jobs WHERE user_id = ? AND status = ?").get(userId, status) as Row;
+  countJobs(actorId: string, status: JobStatus): number {
+    const row = this.sqlite.prepare("SELECT COUNT(*) AS count FROM jobs WHERE actor_id = ? AND status = ?").get(actorId, status) as Row;
     return Number(row.count);
   }
 
@@ -284,7 +351,7 @@ export class RunnerDatabase {
             cost = cost + excluded.cost,
             input_tokens = input_tokens + excluded.input_tokens,
             output_tokens = output_tokens + excluded.output_tokens
-        `).run(this.usageDate(), job.userId, usage.cost, usage.inputTokens, usage.outputTokens);
+        `).run(this.usageDate(), job.actorId, usage.cost, usage.inputTokens, usage.outputTokens);
       }
     });
   }

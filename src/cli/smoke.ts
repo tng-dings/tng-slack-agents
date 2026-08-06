@@ -27,11 +27,12 @@ async function main(): Promise<void> {
   const prompt = process.argv.slice(2).join(" ").trim() || defaultPrompt;
   const sourceEventId = `local-smoke:${randomUUID()}`;
   const job = database.insertJob(randomUUID(), {
+    integration: "local",
     sourceEventId,
-    workspaceId: "local",
-    channelId: "cli",
-    threadTs: "smoke",
-    userId: "local-user",
+    tenantId: "local",
+    conversationId: "cli",
+    threadId: "smoke",
+    actorId: "local-user",
     prompt,
   });
   const session = database.getSession(job.sessionKey)!;

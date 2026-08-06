@@ -92,16 +92,16 @@ export class AgentRunner {
   }
 
   async submit(submission: JobSubmission): Promise<SubmissionResult> {
-    if (!this.allowedWorkspaces.has(submission.workspaceId) || !this.allowedUsers.has(submission.userId)) {
+    if (!this.allowedWorkspaces.has(submission.tenantId) || !this.allowedUsers.has(submission.actorId)) {
       const rejection = new AuthorizationError();
       await this.audit.log(
         "job_rejected",
-        { reason: rejection.code, workspaceId: submission.workspaceId, channelId: submission.channelId },
-        { userId: submission.userId },
+        { reason: rejection.code, integration: submission.integration, tenantId: submission.tenantId, conversationId: submission.conversationId },
+        { userId: submission.actorId },
       );
       throw rejection;
     }
-    const existing = this.database.getJobBySourceEvent(submission.sourceEventId);
+    const existing = this.database.getJobBySourceEvent(submission.integration, submission.sourceEventId);
     if (existing) return { job: existing, isNew: false };
     const prompt = submission.prompt.trim();
     if (!prompt) throw new LimitError("The prompt is empty.", "EMPTY_PROMPT");
@@ -122,15 +122,25 @@ export class AgentRunner {
     if (rejection) {
       await this.audit.log(
         "job_rejected",
-        { reason: rejection.code, workspaceId: submission.workspaceId, channelId: submission.channelId },
-        { userId: submission.userId },
+        { reason: rejection.code, integration: submission.integration, tenantId: submission.tenantId, conversationId: submission.conversationId },
+        { userId: submission.actorId },
       );
       throw rejection;
     }
-    const job = this.database.insertJob(randomUUID(), normalized);
+    let job: JobRecord;
+    try {
+      job = this.database.insertJob(randomUUID(), normalized);
+    } catch (error) {
+      // Another delivery of the same platform event may win between the lookup
+      // above and the unique insert. Treat that race as the same deduplicated
+      // submission rather than producing a second platform reply.
+      const concurrent = this.database.getJobBySourceEvent(submission.integration, submission.sourceEventId);
+      if (concurrent) return { job: concurrent, isNew: false };
+      throw error;
+    }
     await this.audit.log(
       "job_queued",
-      { prompt: contentMetadata(prompt), attachments: attachmentMetadata(attachments), workspaceId: job.workspaceId, channelId: job.channelId, threadTs: job.threadTs },
+      { prompt: contentMetadata(prompt), attachments: attachmentMetadata(attachments), integration: job.integration, tenantId: job.tenantId, conversationId: job.conversationId, threadId: job.threadId },
       this.context(job),
     );
     try {
@@ -172,10 +182,10 @@ export class AgentRunner {
   }
 
   private rejectionFor(submission: JobSubmission): RunnerError | undefined {
-    if (this.database.countJobs(submission.userId, "queued") >= this.config.limits.maxQueuedJobsPerUser) {
+    if (this.database.countJobs(submission.actorId, "queued") >= this.config.limits.maxQueuedJobsPerUser) {
       return new LimitError("Your queue is full. Wait for an existing job to finish.", "QUEUE_LIMIT");
     }
-    if (this.database.dailyUsage(submission.userId).cost >= this.config.limits.dailyCostCap) {
+    if (this.database.dailyUsage(submission.actorId).cost >= this.config.limits.dailyCostCap) {
       return new LimitError("Your daily agent budget has been reached.", "DAILY_BUDGET");
     }
     return undefined;
@@ -211,7 +221,7 @@ export class AgentRunner {
     let succeeded = false;
     let failureForUser = "";
     let toolEventCount = 0;
-    const costBeforeJob = this.database.dailyUsage(job.userId).cost;
+    const costBeforeJob = this.database.dailyUsage(job.actorId).cost;
 
     try {
       const session = this.database.getSession(job.sessionKey);
@@ -305,7 +315,7 @@ export class AgentRunner {
   }
 
   private context(job: JobRecord): { jobId: string; userId: string; sessionKey: string } {
-    return { jobId: job.id, userId: job.userId, sessionKey: job.sessionKey };
+    return { jobId: job.id, userId: job.actorId, sessionKey: job.sessionKey };
   }
 
   private async maintenance(): Promise<void> {

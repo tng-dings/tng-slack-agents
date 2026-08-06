@@ -42,8 +42,8 @@ export class SlackJobReporter implements JobReporter {
     await this.setStatus("Working…");
     if (this.replyTs) return;
     const posted = await this.client.chat.postMessage({
-      channel: this.job.channelId,
-      thread_ts: this.job.threadTs,
+      channel: this.job.conversationId,
+      thread_ts: this.job.threadId,
       text: "Working…",
     });
     if (posted.ts) {
@@ -96,10 +96,10 @@ export class SlackJobReporter implements JobReporter {
     if (this.nativeStreaming && !this.nativeFailed) {
       try {
         this.stream ??= this.client.chatStream({
-          channel: this.job.channelId,
-          thread_ts: this.job.threadTs,
-          recipient_team_id: this.job.workspaceId,
-          recipient_user_id: this.job.userId,
+          channel: this.job.conversationId,
+          thread_ts: this.job.threadId,
+          recipient_team_id: this.job.tenantId,
+          recipient_user_id: this.job.actorId,
         });
         await this.stream.append({ markdown_text: delta });
         return;
@@ -113,15 +113,15 @@ export class SlackJobReporter implements JobReporter {
 
   private async updateWorkingMessage(text: string): Promise<void> {
     if (this.replyTs) {
-      await this.client.chat.update({ channel: this.job.channelId, ts: this.replyTs, text });
+      await this.client.chat.update({ channel: this.job.conversationId, ts: this.replyTs, text });
     } else {
-      await this.client.chat.postMessage({ channel: this.job.channelId, thread_ts: this.job.threadTs, text });
+      await this.client.chat.postMessage({ channel: this.job.conversationId, thread_ts: this.job.threadId, text });
     }
   }
 
   private async setStatus(status: string): Promise<void> {
     await this.client.assistant.threads
-      .setStatus({ channel_id: this.job.channelId, thread_ts: this.job.threadTs, status })
+      .setStatus({ channel_id: this.job.conversationId, thread_ts: this.job.threadId, status })
       .catch(() => undefined);
   }
 }
@@ -200,11 +200,12 @@ export class SlackGateway {
       const sourceEventId = typeof eventId === "string" && eventId ? eventId : `${workspaceId}:${channelId}:${eventTs}`;
       try {
         await this.runner.submit({
+          integration: "slack",
           sourceEventId,
-          workspaceId,
-          channelId,
-          threadTs,
-          userId: event.user,
+          tenantId: workspaceId,
+          conversationId: channelId,
+          threadId: threadTs,
+          actorId: event.user,
           prompt,
           attachments,
         });

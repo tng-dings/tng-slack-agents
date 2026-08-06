@@ -83,11 +83,12 @@ test("OpenCode executor sends file parts for image attachments", async () => {
     audit,
   );
   const job = database.insertJob("job-attach", {
+    integration: "slack",
     sourceEventId: "event-attach",
-    workspaceId: "T1",
-    channelId: "D1",
-    threadTs: "1.0",
-    userId: "U_ALLOWED",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "1.0",
+    actorId: "U_ALLOWED",
     prompt: "What is in this screenshot?",
     attachments: [{ mime: "image/png", filename: "screen.png", dataUrl: "data:image/png;base64,iVBORw0KGgo=" }],
   });
@@ -221,11 +222,12 @@ test("OpenCode executor creates a worktree, streams events, and returns usage", 
     audit,
   );
   const job = database.insertJob("job-1", {
+    integration: "slack",
     sourceEventId: "event-1",
-    workspaceId: "T1",
-    channelId: "D1",
-    threadTs: "1.0",
-    userId: "U_ALLOWED",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "1.0",
+    actorId: "U_ALLOWED",
     prompt: "Say hello",
   });
   const deltas: string[] = [];

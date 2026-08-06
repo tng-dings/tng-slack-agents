@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import type { WebClient } from "@slack/web-api";
 import { AuditLogger } from "../src/audit.js";
@@ -48,18 +49,22 @@ test("runner persists jobs and sessions, enforces authz, accounts usage, and red
   const runner = new AgentRunner(config, database, executor, audit, (job) => reporterFactory(job.id));
   await runner.start();
   const submission = {
+    integration: "slack" as const,
     sourceEventId: "slack-event-1",
-    workspaceId: "T1",
-    channelId: "D1",
-    threadTs: "100.1",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "100.1",
     replyTs: "100.2",
-    userId: "U_ALLOWED",
+    actorId: "U_ALLOWED",
     prompt: "Do work with password=super-secret",
   };
-  const { job } = await runner.submit(submission);
-  const duplicate = await runner.submit(submission);
+  const submissions = await Promise.all([runner.submit(submission), runner.submit(submission)]);
+  const first = submissions.find((result) => result.isNew);
+  const duplicate = submissions.find((result) => !result.isNew);
+  assert(first);
+  assert(duplicate);
+  const { job } = first;
   assert.equal(duplicate.job.id, job.id);
-  assert.equal(duplicate.isNew, false);
   await waitFor(() => database.getJob(job.id)?.status === "succeeded");
 
   assert.equal(database.getJob(job.id)?.output, "done");
@@ -67,10 +72,10 @@ test("runner persists jobs and sessions, enforces authz, accounts usage, and red
   assert.deepEqual(database.dailyUsage("U_ALLOWED"), { cost: 0.4, inputTokens: 10, outputTokens: 2 });
   assert.equal(reports.get(job.id)?.output, "done");
   await assert.rejects(
-    runner.submit({ ...submission, sourceEventId: "unauthorized", userId: "U_DENIED" }),
+    runner.submit({ ...submission, sourceEventId: "unauthorized", actorId: "U_DENIED" }),
     AuthorizationError,
   );
-  assert.equal(database.getJobBySourceEvent("unauthorized"), undefined);
+  assert.equal(database.getJobBySourceEvent("slack", "unauthorized"), undefined);
   await audit.log("redaction_probe", { authorization: "super-secret" });
   await runner.stop();
   await audit.flush();
@@ -92,11 +97,12 @@ test("runner marks an in-flight job failed after restart instead of replaying it
   const config = testConfig(root);
   const database = new RunnerDatabase(config.storage.databasePath);
   const submission = {
+    integration: "slack" as const,
     sourceEventId: "event-running",
-    workspaceId: "T1",
-    channelId: "D1",
-    threadTs: "200.1",
-    userId: "U_ALLOWED",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "200.1",
+    actorId: "U_ALLOWED",
     prompt: "work",
   };
   const queued = database.insertJob("job-running", submission);
@@ -151,11 +157,12 @@ test("runner persists attachments and passes them to the executor", async () => 
   await runner.start();
   const attachment: Attachment = { mime: "image/png", filename: "screenshot.png", dataUrl: "data:image/png;base64,iVBOR" };
   const { job } = await runner.submit({
+    integration: "slack",
     sourceEventId: "attach-event-1",
-    workspaceId: "T1",
-    channelId: "D1",
-    threadTs: "300.1",
-    userId: "U_ALLOWED",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "300.1",
+    actorId: "U_ALLOWED",
     prompt: "Review this screenshot",
     attachments: [attachment],
   });
@@ -187,11 +194,121 @@ test("runner rejects jobs exceeding the attachment count limit", async () => {
     { mime: "image/png", filename: "b.png", dataUrl: "data:image/png;base64,BBB" },
   ];
   await assert.rejects(
-    runner.submit({ sourceEventId: "attach-limit", workspaceId: "T1", channelId: "D1", threadTs: "400.1", userId: "U_ALLOWED", prompt: "too many", attachments }),
+    runner.submit({ integration: "slack", sourceEventId: "attach-limit", tenantId: "T1", conversationId: "D1", threadId: "400.1", actorId: "U_ALLOWED", prompt: "too many", attachments }),
     /attachment count/i,
   );
   await runner.stop();
   database.close();
+  await rm(root, { recursive: true, force: true });
+});
+
+test("database namespaces integration event and session identities", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-identities-"));
+  const database = new RunnerDatabase(path.join(root, "runner.db"));
+  const common = {
+    sourceEventId: "same-event",
+    tenantId: "tenant",
+    conversationId: "conversation",
+    threadId: "thread",
+    actorId: "actor",
+    prompt: "work",
+  };
+
+  const slackJob = database.insertJob("slack-job", { ...common, integration: "slack" });
+  const discordJob = database.insertJob("discord-job", { ...common, integration: "discord" });
+
+  assert.equal(slackJob.sessionKey, "slack:tenant:conversation:thread");
+  assert.equal(discordJob.sessionKey, "discord:tenant:conversation:thread");
+  assert.notEqual(slackJob.sessionKey, discordJob.sessionKey);
+  assert.equal(database.getJobBySourceEvent("slack", "same-event")?.id, slackJob.id);
+  assert.equal(database.getJobBySourceEvent("discord", "same-event")?.id, discordJob.id);
+  assert.throws(
+    () => database.insertJob("duplicate-slack-job", {
+      ...common,
+      integration: "slack",
+      threadId: "orphan-if-not-atomic",
+    }),
+    /UNIQUE constraint failed/,
+  );
+  assert.equal(database.getSession("slack:tenant:conversation:orphan-if-not-atomic"), undefined);
+
+  database.close();
+  await rm(root, { recursive: true, force: true });
+});
+
+test("database idempotently upgrades legacy Slack identity rows", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-migration-"));
+  const filename = path.join(root, "runner.db");
+  const legacy = new DatabaseSync(filename);
+  legacy.exec(`
+    PRAGMA foreign_keys = ON;
+    CREATE TABLE sessions (
+      session_key TEXT PRIMARY KEY,
+      workspace_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      thread_ts TEXT NOT NULL,
+      opencode_session_id TEXT,
+      working_directory TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE jobs (
+      id TEXT PRIMARY KEY,
+      source_event_id TEXT NOT NULL UNIQUE,
+      session_key TEXT NOT NULL REFERENCES sessions(session_key),
+      workspace_id TEXT NOT NULL,
+      channel_id TEXT NOT NULL,
+      thread_ts TEXT NOT NULL,
+      reply_ts TEXT,
+      user_id TEXT NOT NULL,
+      prompt TEXT NOT NULL,
+      status TEXT NOT NULL CHECK(status IN ('queued','running','succeeded','failed','timed_out','rejected')),
+      output TEXT NOT NULL DEFAULT '',
+      error TEXT,
+      cost REAL NOT NULL DEFAULT 0,
+      input_tokens INTEGER NOT NULL DEFAULT 0,
+      output_tokens INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL,
+      started_at TEXT,
+      finished_at TEXT
+    );
+    INSERT INTO sessions VALUES ('T1:D1:1.0', 'T1', 'D1', '1.0', 'oc-1', '/worktree', '2026-01-01', '2026-01-01');
+    INSERT INTO jobs(
+      id, source_event_id, session_key, workspace_id, channel_id, thread_ts,
+      user_id, prompt, status, created_at
+    ) VALUES ('legacy-job', 'Ev1', 'T1:D1:1.0', 'T1', 'D1', '1.0', 'U1', 'work', 'queued', '2026-01-01');
+  `);
+  legacy.close();
+
+  const migrated = new RunnerDatabase(filename);
+  const job = migrated.getJob("legacy-job");
+  assert.deepEqual(
+    job && {
+      integration: job.integration,
+      sourceEventId: job.sourceEventId,
+      sessionKey: job.sessionKey,
+      tenantId: job.tenantId,
+      conversationId: job.conversationId,
+      threadId: job.threadId,
+      actorId: job.actorId,
+    },
+    {
+      integration: "slack",
+      sourceEventId: "Ev1",
+      sessionKey: "slack:T1:D1:1.0",
+      tenantId: "T1",
+      conversationId: "D1",
+      threadId: "1.0",
+      actorId: "U1",
+    },
+  );
+  assert.equal(migrated.getSession("slack:T1:D1:1.0")?.integration, "slack");
+  migrated.close();
+
+  const reopened = new RunnerDatabase(filename);
+  assert.equal(reopened.getJobBySourceEvent("slack", "Ev1")?.id, "legacy-job");
+  assert.equal(reopened.getSession("slack:T1:D1:1.0")?.openCodeSessionId, "oc-1");
+  reopened.close();
   await rm(root, { recursive: true, force: true });
 });
 
@@ -227,13 +344,14 @@ test("Slack reporter uses native streaming with the correct destination", async 
   } as unknown as WebClient;
   const job: JobRecord = {
     id: "job-slack",
+    integration: "slack",
     sourceEventId: "event-slack",
-    sessionKey: "T1:D1:1.0",
-    workspaceId: "T1",
-    channelId: "D1",
-    threadTs: "1.0",
+    sessionKey: "slack:T1:D1:1.0",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "1.0",
     replyTs: "1.1",
-    userId: "U1",
+    actorId: "U1",
     prompt: "hello",
     attachments: [],
     status: "running",

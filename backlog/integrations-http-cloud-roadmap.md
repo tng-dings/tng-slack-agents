@@ -114,12 +114,12 @@ This milestone should preserve user-visible behavior. Complete its contracts bef
 
 **Primary files:** `src/types.ts`, `src/database.ts`, database-focused tests.
 
-- [ ] Add a persisted integration discriminator to jobs and sessions.
-- [ ] Replace Slack-only identity assumptions with normalized tenant, conversation, thread, and actor concepts at the orchestration boundary.
-- [ ] Namespace source-event and session keys by integration.
-- [ ] Add an additive SQLite migration/backfill for existing Slack rows; do not require operators to delete their database.
-- [ ] Keep migration startup idempotent and test upgrading an existing-schema fixture.
-- [ ] Ensure duplicate source events remain atomic after namespacing.
+- [x] Add a persisted integration discriminator to jobs and sessions.
+- [x] Replace Slack-only identity assumptions with normalized tenant, conversation, thread, and actor concepts at the orchestration boundary.
+- [x] Namespace source-event and session keys by integration.
+- [x] Add an additive SQLite migration/backfill for existing Slack rows; do not require operators to delete their database.
+- [x] Keep migration startup idempotent and test upgrading an existing-schema fixture.
+- [x] Ensure duplicate source events remain atomic after namespacing.
 
 **Acceptance criteria**
 
