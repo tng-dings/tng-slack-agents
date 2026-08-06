@@ -6,7 +6,7 @@ This is the actionable gate for the first live Slack test. Do not add a tester t
 
 - [ ] Approve one internal, non-Marketplace custom app named **Company Coding Agent** in the test workspace.
 - [ ] Approve Slack's current `agent_view` Agents experience with the Messages tab enabled; `assistant_view` is not requested.
-- [ ] Approve only the bot scopes `assistant:write`, `chat:write`, and `im:history`.
+- [ ] Approve only the bot scopes `assistant:write`, `chat:write`, `files:read`, and `im:history`.
 - [ ] Approve the bot events `app_home_opened` and `message.im`.
 - [ ] Enable Socket Mode and create one app-level `xapp-` token with only `connections:write`.
 - [ ] Install the app and transfer its `xoxb-` bot token through the approved secret channel.

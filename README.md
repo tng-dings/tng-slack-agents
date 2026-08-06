@@ -5,7 +5,7 @@ This service accepts allowlisted direct messages from a Slack agent app, persist
 ## Current MVP behavior
 
 - Slack Bolt with outbound-only Socket Mode and the current `agent_view` experience.
-- DM-only messages; bot messages and other conversation types are ignored.
+- DM-only messages; bot messages and other conversation types are ignored. Image attachments (screenshots) are downloaded and forwarded to OpenCode as file parts.
 - Immediate `Working…` reply after authorization and event deduplication. Live updates are disabled by default so output can be redacted before delivery.
 - Durable SQLite queue and OpenCode session mapping keyed by workspace, channel, and thread timestamp.
 - Per-thread serialization, per-user/global concurrency limits, queue limit, timeout, allowlist, and daily cost cap.

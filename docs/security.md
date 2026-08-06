@@ -15,7 +15,7 @@ The duplicated OpenCode password authenticates one loopback-only connection. It 
 
 - Slack events are accepted only from direct messages, exact configured workspace IDs, and exact configured user IDs.
 - Authorization occurs before job persistence or a `Working…` response. Slack `event_id` is the primary idempotency key, so retries do not create duplicate replies.
-- The Slack manifest requests only `assistant:write`, `chat:write`, and `im:history`; Socket Mode exposes no inbound HTTP endpoint.
+- The Slack manifest requests only `assistant:write`, `chat:write`, `files:read`, and `im:history`; Socket Mode exposes no inbound HTTP endpoint.
 - OpenCode URLs are restricted to HTTP loopback literals, credentials/paths/query strings are rejected, and HTTP redirects are disabled.
 - Slack credentials never enter the worker secret bundle. Gateway Git subprocesses receive an allowlisted environment without gateway secrets.
 - Runtime-inline OpenCode policy denies external-directory access, web tools, subagents, skills, and interactive questions; unknown tools require approval and are automatically rejected. Shell/edit access remains because this is a coding worker.

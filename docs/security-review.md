@@ -11,10 +11,10 @@ The requested approval scope is one workspace, one named tester, and one disposa
 ## Data flow
 
 ```text
-Allowlisted Slack DM
+Allowlisted Slack DM (text and optional image attachments)
   -> Slack Socket Mode connection
-  -> AgentRunner (Slack credentials, queue, audit metadata)
-  -> authenticated 127.0.0.1 OpenCode API
+  -> AgentRunner downloads images via authenticated Slack API, persists prompt + attachments as a queued job
+  -> authenticated 127.0.0.1 OpenCode API (text prompt + image file parts)
   -> OpenCodeServer (provider credential, detached worktree)
   -> approved model provider
   -> redacted and bounded response to the originating Slack DM thread
@@ -28,6 +28,7 @@ Bot scopes:
 
 - `assistant:write` — agent-thread status and suggestions
 - `chat:write` — replies in the originating app DM
+- `files:read` — download image attachments (screenshots) shared in DMs
 - `im:history` — receive direct messages sent to the app
 
 Events:
