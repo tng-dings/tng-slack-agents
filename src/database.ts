@@ -1,7 +1,16 @@
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
-import type { Attachment, IntegrationId, JobRecord, JobStatus, JobSubmission, SessionRecord, Usage } from "./types.js";
+import type {
+  Attachment,
+  InboundEventRecord,
+  IntegrationId,
+  JobRecord,
+  JobStatus,
+  JobSubmission,
+  SessionRecord,
+  Usage,
+} from "./types.js";
 
 type Row = Record<string, unknown>;
 
@@ -67,13 +76,38 @@ function mapSession(row: Row): SessionRecord {
   };
 }
 
+function mapInboundEvent(row: Row): InboundEventRecord {
+  let payload: unknown = {};
+  try {
+    payload = JSON.parse(String(row.payload_json));
+  } catch {
+    // A malformed persisted envelope is handled by the platform processor.
+  }
+  return {
+    eventKey: String(row.event_key),
+    integration: String(row.integration) as IntegrationId,
+    sourceEventId: String(row.source_event_id),
+    payload,
+    status: String(row.status) as InboundEventRecord["status"],
+    attempts: Number(row.attempts),
+    lastError: row.last_error === null ? null : String(row.last_error),
+    availableAt: String(row.available_at),
+    receivedAt: String(row.received_at),
+    updatedAt: String(row.updated_at),
+    processedAt: row.processed_at === null ? null : String(row.processed_at),
+  };
+}
+
 export class RunnerDatabase {
   readonly sqlite: DatabaseSync;
 
   constructor(filename: string) {
     mkdirSync(path.dirname(filename), { recursive: true });
     this.sqlite = new DatabaseSync(filename);
-    this.sqlite.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 5000;");
+    // Keep lock contention below Slack's three-second acknowledgement window.
+    // This process owns one connection, so a longer wait would mainly mask an
+    // unexpected external writer while causing Slack to retry the request.
+    this.sqlite.exec("PRAGMA journal_mode = WAL; PRAGMA foreign_keys = ON; PRAGMA busy_timeout = 1000;");
     this.migrate();
   }
 
@@ -145,6 +179,23 @@ export class RunnerDatabase {
         session_key TEXT,
         payload_json TEXT NOT NULL
       );
+
+      CREATE TABLE IF NOT EXISTS inbound_events (
+        event_key TEXT PRIMARY KEY,
+        integration TEXT NOT NULL,
+        source_event_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK(status IN ('pending','processing','processed')),
+        attempts INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        available_at TEXT NOT NULL,
+        received_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        processed_at TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS inbound_events_claim_idx
+        ON inbound_events(integration, status, available_at, received_at);
     `);
 
     const jobColumns = this.sqlite.prepare("PRAGMA table_info(jobs)").all() as Row[];
@@ -265,6 +316,87 @@ export class RunnerDatabase {
 
   updateJobReplyTs(id: string, replyTs: string): void {
     this.sqlite.prepare("UPDATE jobs SET reply_ts = ? WHERE id = ?").run(replyTs, id);
+  }
+
+  insertInboundEvent(
+    integration: IntegrationId,
+    sourceEventId: string,
+    payload: unknown,
+  ): { event: InboundEventRecord; isNew: boolean } {
+    const eventKey = `${integration}:${sourceEventId}`;
+    const timestamp = now();
+    const result = this.sqlite.prepare(`
+      INSERT OR IGNORE INTO inbound_events(
+        event_key, integration, source_event_id, payload_json, status,
+        available_at, received_at, updated_at
+      ) VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+    `).run(
+      eventKey,
+      integration,
+      sourceEventId,
+      JSON.stringify(payload) as SQLInputValue,
+      timestamp,
+      timestamp,
+      timestamp,
+    );
+    return { event: this.getInboundEvent(integration, sourceEventId)!, isNew: result.changes === 1 };
+  }
+
+  getInboundEvent(integration: IntegrationId, sourceEventId: string): InboundEventRecord | undefined {
+    const row = this.sqlite.prepare("SELECT * FROM inbound_events WHERE event_key = ?")
+      .get(`${integration}:${sourceEventId}`) as Row | undefined;
+    return row ? mapInboundEvent(row) : undefined;
+  }
+
+  claimNextInboundEvent(integration: IntegrationId): InboundEventRecord | undefined {
+    return this.transaction(() => {
+      const row = this.sqlite.prepare(`
+        SELECT * FROM inbound_events
+        WHERE integration = ? AND status = 'pending' AND available_at <= ?
+        ORDER BY received_at, event_key
+        LIMIT 1
+      `).get(integration, now()) as Row | undefined;
+      if (!row) return undefined;
+      const result = this.sqlite.prepare(`
+        UPDATE inbound_events
+        SET status = 'processing', attempts = attempts + 1, updated_at = ?
+        WHERE event_key = ? AND status = 'pending'
+      `).run(now(), String(row.event_key));
+      if (result.changes !== 1) return undefined;
+      const claimed = this.sqlite.prepare("SELECT * FROM inbound_events WHERE event_key = ?")
+        .get(String(row.event_key)) as Row;
+      return mapInboundEvent(claimed);
+    });
+  }
+
+  completeInboundEvent(eventKey: string): void {
+    const timestamp = now();
+    this.sqlite.prepare(`
+      UPDATE inbound_events
+      SET status = 'processed', payload_json = '{}', last_error = NULL,
+        updated_at = ?, processed_at = ?
+      WHERE event_key = ? AND status = 'processing'
+    `).run(timestamp, timestamp, eventKey);
+  }
+
+  retryInboundEvent(eventKey: string, error: string, delayMs: number): void {
+    const timestamp = now();
+    const availableAt = new Date(Date.now() + Math.max(0, delayMs)).toISOString();
+    this.sqlite.prepare(`
+      UPDATE inbound_events
+      SET status = 'pending', last_error = ?, available_at = ?, updated_at = ?
+      WHERE event_key = ? AND status = 'processing'
+    `).run(error.slice(0, 1_000), availableAt, timestamp, eventKey);
+  }
+
+  recoverInboundEvents(integration: IntegrationId): number {
+    const timestamp = now();
+    const result = this.sqlite.prepare(`
+      UPDATE inbound_events
+      SET status = 'pending', available_at = ?, updated_at = ?
+      WHERE integration = ? AND status = 'processing'
+    `).run(timestamp, timestamp, integration);
+    return Number(result.changes);
   }
 
   insertJob(id: string, submission: JobSubmission, status: JobStatus = "queued", error: string | null = null): JobRecord {
@@ -388,6 +520,7 @@ export class RunnerDatabase {
       this.sqlite.prepare("DELETE FROM audit_events WHERE created_at < ?").run(cutoff);
       this.sqlite.prepare("DELETE FROM daily_usage WHERE usage_date < ?").run(cutoff.slice(0, 10));
       this.sqlite.prepare("DELETE FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ?").run(cutoff);
+      this.sqlite.prepare("DELETE FROM inbound_events WHERE status = 'processed' AND processed_at < ?").run(cutoff);
       const rows = this.sqlite.prepare(`
         SELECT * FROM sessions WHERE updated_at < ?
           AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.session_key = sessions.session_key)

@@ -7,10 +7,17 @@ export function testConfig(root: string): RunnerConfig {
     },
     slack: {
       enabled: false,
+      ingress: "socket",
       allowedWorkspaceIds: ["T1"],
       allowedUserIds: ["U_ALLOWED"],
       liveUpdates: false,
       nativeStreaming: false,
+      http: {
+        host: "127.0.0.1",
+        port: 3000,
+        eventsPath: "/slack/events",
+        healthPath: "/healthz",
+      },
     },
     openCode: {
       baseUrl: "http://127.0.0.1:1",

@@ -4,6 +4,8 @@ param(
     [string]$WorkerDataDirectory = "$env:ProgramData\OpenCodeWorker",
     [string]$GatewayServiceIdentity = "NT SERVICE\AgentRunner",
     [string]$WorkerServiceIdentity = "NT SERVICE\OpenCodeServer",
+    [ValidateSet("socket", "events-api")]
+    [string]$SlackIngress = "socket",
     [Alias("AdditionalSecretNames")]
     [string[]]$WorkerSecretNames = @()
 )
@@ -107,8 +109,13 @@ Set-RestrictedDirectoryAcl $worktreeDirectory @($GatewayServiceIdentity, $Worker
 $openCodePassword = Read-PlainSecret "OpenCode server password"
 $gatewaySecrets = @{
     SLACK_BOT_TOKEN = Read-PlainSecret "Slack bot token (xoxb-...)"
-    SLACK_APP_TOKEN = Read-PlainSecret "Slack app token (xapp-...)"
     OPENCODE_SERVER_PASSWORD = $openCodePassword
+}
+if ($SlackIngress -eq "socket") {
+    $gatewaySecrets.SLACK_APP_TOKEN = Read-PlainSecret "Slack app token (xapp-...)"
+}
+else {
+    $gatewaySecrets.SLACK_SIGNING_SECRET = Read-PlainSecret "Slack signing secret"
 }
 $workerSecrets = @{
     OPENCODE_SERVER_PASSWORD = $openCodePassword

@@ -151,6 +151,40 @@ test("Slack adapter authenticates bounded image downloads and submits normalized
   assert.equal(calls.length, 0);
 });
 
+test("durable Slack processing retries transient attachment download failures", async () => {
+  const config = testConfig(".");
+  const adapter = new SlackAdapter(
+    config,
+    { openCodePassword: "password", slackBotToken: "xoxb-secret" },
+    clientDouble([]),
+    { fetch: async () => new Response(undefined, { status: 503 }) },
+  );
+  let submitted = false;
+  adapter.attachRunner({
+    submit: async () => {
+      submitted = true;
+      return { job: {} as never, isNew: true };
+    },
+  });
+  const prepared = adapter.prepareMessage({
+    channel_type: "im",
+    channel: "D1",
+    user: "U_ALLOWED",
+    ts: "1.0",
+    text: "",
+    files: [{
+      mimetype: "image/png",
+      url_private_download: "https://files/one",
+      size: 3,
+      name: "one.png",
+    }],
+  }, { team_id: "T1", event_id: "Ev-retry-download" });
+  assert.equal(prepared.kind, "accepted");
+  if (prepared.kind !== "accepted") return;
+  await assert.rejects(adapter.processMessage(prepared.message, undefined, true), /attachment download failed/);
+  assert.equal(submitted, false);
+});
+
 test("Slack adapter keeps denial throttling and app-home suggestions platform-local", async () => {
   const config = testConfig(".");
   const calls: Array<{ kind: string; value: unknown }> = [];

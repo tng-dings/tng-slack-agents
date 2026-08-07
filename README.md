@@ -4,7 +4,7 @@ This service accepts allowlisted direct messages from a Slack agent app, persist
 
 ## Current MVP behavior
 
-- Slack Bolt with outbound-only Socket Mode and the current `agent_view` experience.
+- Slack Bolt with configurable Socket Mode or Events API HTTPS ingress and the current `agent_view` experience.
 - DM-only messages; bot messages and other conversation types are ignored. Image attachments (screenshots) are downloaded and forwarded to OpenCode as file parts.
 - Immediate `Working…` reply after authorization and event deduplication. Live updates are disabled by default so output can be redacted before delivery.
 - Durable SQLite queue and OpenCode session mapping keyed by workspace, channel, and thread timestamp.
@@ -58,6 +58,22 @@ npm run dev
 
 Only exact workspace IDs in `slack.allowedWorkspaceIds` and user IDs in `slack.allowedUserIds` can enqueue work. Start with a disposable repository and a single allowlisted tester.
 
+## Slack Events API development run
+
+Set `slack.ingress` to `"events-api"`, set `slack.appId` to the exact Slack application ID, and configure `slack.http.host`, `port`, `eventsPath`, and `healthPath`. Use [slack/manifest.events-api.json](slack/manifest.events-api.json) after replacing its example Request URL with the managed public TLS URL. The public edge must forward only the events and health paths to the private Node listener.
+
+```powershell
+$env:OPENCODE_SERVER_PASSWORD = '<server-password>'
+$env:SLACK_BOT_TOKEN = 'xoxb-...'
+$env:SLACK_SIGNING_SECRET = '<signing-secret>'
+npm run doctor
+npm run dev
+```
+
+`SLACK_APP_TOKEN` is not required in this mode. Bolt verifies the raw request signature and timestamp. Authorized message events are normalized and committed to the SQLite inbound inbox before the HTTP 200 response is released. Attachment downloads, job submission, and Slack replies occur asynchronously. Pending or interrupted inbox work resumes after restart, while the existing namespaced job key prevents a retried event from creating a second job or initial reply.
+
+The built-in listener is plain HTTP and must not be exposed directly to the internet. Terminate TLS and enforce body, header, connection, request-time, and rate limits at a managed load balancer or hardened reverse proxy.
+
 ## Verification
 
 ```powershell
@@ -84,6 +100,8 @@ Then run `scripts\Set-AgentRunnerSecrets.ps1` from an elevated PowerShell prompt
 ```powershell
 .\scripts\Set-AgentRunnerSecrets.ps1 -WorkerSecretNames ANTHROPIC_API_KEY
 ```
+
+For Events API mode, provision the gateway bundle with `-SlackIngress events-api`; this stores `SLACK_SIGNING_SECRET` instead of `SLACK_APP_TOKEN`.
 
 Write the absolute `node.exe` location into `%ProgramData%\AgentRunner\node-path.txt` and the absolute `opencode.exe` location into `%ProgramData%\OpenCodeWorker\opencode-path.txt`. Grant both virtual identities read/execute access to this runner project so they can load their wrapper scripts. Grant `NT SERVICE\AgentRunner` the source-repository access needed to create Git worktrees, and grant `NT SERVICE\OpenCodeServer` only the configured repository/worktree and `.git/worktrees` access needed by agent execution. Then start both wrappers:
 

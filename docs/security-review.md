@@ -8,6 +8,14 @@ The Slack gateway and coding worker are separate Windows security principals. Sl
 
 The requested approval scope is one workspace, one named tester, and one disposable or backed-up repository.
 
+## Events API deployment delta
+
+The initial approval path below remains Socket Mode. An Events API deployment instead uses the separately named [`slack/manifest.events-api.json`](../slack/manifest.events-api.json), a bot token, and a signing secret; it does not require an app-level Socket Mode token.
+
+In Events API mode, a managed TLS endpoint or hardened reverse proxy is the only internet-facing component. It forwards only `POST /slack/events` and the minimal health route to the private Node listener and enforces request-body, header, connection, request-time, and rate limits before Bolt buffers a request. Source IP allowlisting is not a substitute for Slack signature verification.
+
+Bolt verifies the unmodified request body, signature, and timestamp before dispatch. The adapter then validates the exact app ID, workspace, user, direct-message context, event type, and bot/subtype rules. Authorized messages are committed to a namespaced SQLite inbox before HTTP 200 is released. Attachment retrieval, job creation, and Slack delivery happen asynchronously; pending or interrupted inbox events recover after restart, and existing event/job keys make Slack retries idempotent. Invalid, stale, malformed, wrong-app, and unauthorized requests create no job.
+
 ## Data flow
 
 ```text
@@ -55,6 +63,7 @@ The version-controlled scope definition is [`slack/manifest.json`](../slack/mani
 | --- | --- | --- |
 | Slack bot token | `NT SERVICE\AgentRunner` | No |
 | Slack app-level token | `NT SERVICE\AgentRunner` | No |
+| Slack signing secret (Events API only) | `NT SERVICE\AgentRunner` | No |
 | OpenCode client/server password | Both, in separate bundles | Yes, by design |
 | Model-provider credential | `NT SERVICE\OpenCodeServer` | Yes, accepted MVP risk |
 

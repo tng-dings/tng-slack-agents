@@ -4,7 +4,12 @@ import { RunnerError } from "../errors.js";
 import type { AgentRunner } from "../runner.js";
 import type { Attachment, JobRecord, JobReporter } from "../types.js";
 import { SlackJobReporter } from "./delivery.js";
-import { normalizeSlackAppHome, normalizeSlackMessage, parseSlackMessage } from "./normalization.js";
+import {
+  normalizeSlackAppHome,
+  normalizeSlackMessage,
+  parseSlackMessage,
+  type ParsedSlackMessage,
+} from "./normalization.js";
 
 const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 type SlackRunner = Pick<AgentRunner, "submit">;
@@ -13,6 +18,11 @@ export interface SlackAdapterOptions {
   readonly fetch?: typeof fetch;
   readonly now?: () => number;
 }
+
+export type SlackMessagePreparation =
+  | { readonly kind: "accepted"; readonly message: ParsedSlackMessage }
+  | { readonly kind: "denied"; readonly message: ParsedSlackMessage }
+  | { readonly kind: "ignored" };
 
 /** Slack behavior shared by Socket Mode and Events API transports. */
 export class SlackAdapter {
@@ -32,7 +42,12 @@ export class SlackAdapter {
   ) {
     this.allowedWorkspaces = new Set(config.slack.allowedWorkspaceIds);
     this.allowedUsers = new Set(config.slack.allowedUserIds);
-    this.outputSecrets = [secrets.openCodePassword, secrets.slackBotToken, secrets.slackAppToken ?? ""];
+    this.outputSecrets = [
+      secrets.openCodePassword,
+      secrets.slackBotToken,
+      secrets.slackAppToken ?? "",
+      secrets.slackSigningSecret ?? "",
+    ];
     this.fetcher = options.fetch ?? globalThis.fetch;
     this.now = options.now ?? Date.now;
   }
@@ -52,27 +67,60 @@ export class SlackAdapter {
   }
 
   async handleMessage(message: unknown, body: unknown, client: WebClient = this.client): Promise<void> {
-    const parsed = parseSlackMessage(message, body);
-    if (!parsed.accepted) return;
-    const event = parsed.message;
-    if (!this.allowedWorkspaces.has(event.tenantId) || !this.allowedUsers.has(event.actorId)) {
-      await this.postDenial(client, event.tenantId, event.actorId, event.conversationId, event.threadId);
-      return;
+    const prepared = this.prepareMessage(message, body);
+    if (prepared.kind === "ignored") return;
+    if (prepared.kind === "denied") return this.denyMessage(prepared.message, client);
+    await this.processMessage(prepared.message, client);
+  }
+
+  prepareMessage(message: unknown, body: unknown): SlackMessagePreparation {
+    const bodyRecord = typeof body === "object" && body !== null ? body as Record<string, unknown> : {};
+    if (
+      this.config.slack.ingress === "events-api" &&
+      this.config.slack.appId &&
+      bodyRecord.api_app_id !== this.config.slack.appId
+    ) {
+      return { kind: "ignored" };
     }
+    const parsed = parseSlackMessage(message, body);
+    if (!parsed.accepted) return { kind: "ignored" };
+    const event = { ...parsed.message, files: this.attachmentReferences(parsed.message.files) };
+    if (!this.allowedWorkspaces.has(event.tenantId) || !this.allowedUsers.has(event.actorId)) {
+      return { kind: "denied", message: event };
+    }
+    return { kind: "accepted", message: event };
+  }
+
+  async processMessage(
+    event: ParsedSlackMessage,
+    client: WebClient = this.client,
+    retryUnexpected = false,
+  ): Promise<void> {
     if (!this.runner) throw new Error("Slack adapter received a message before the runner was attached");
-    const attachments = await this.downloadAttachments(event.files);
+    const attachments = await this.downloadAttachments(event.files, retryUnexpected);
     const submission = normalizeSlackMessage(event, attachments);
     if (!submission) return;
     try {
       await this.runner.submit(submission);
     } catch (error) {
+      if (retryUnexpected && !(error instanceof RunnerError)) throw error;
       const text = error instanceof RunnerError ? error.message : "The agent runner could not queue this request.";
       await client.chat.postMessage({ channel: event.conversationId, thread_ts: event.threadId, text })
         .catch(() => undefined);
     }
   }
 
+  async denyMessage(event: ParsedSlackMessage, client: WebClient = this.client): Promise<void> {
+    await this.postDenial(client, event.tenantId, event.actorId, event.conversationId, event.threadId);
+  }
+
   async handleAppHome(event: unknown, body: unknown, client: WebClient = this.client): Promise<void> {
+    const bodyRecord = typeof body === "object" && body !== null ? body as Record<string, unknown> : {};
+    if (
+      this.config.slack.ingress === "events-api" &&
+      this.config.slack.appId &&
+      bodyRecord.api_app_id !== this.config.slack.appId
+    ) return;
     const home = normalizeSlackAppHome(event, body);
     if (!home) return;
     if (!this.allowedUsers.has(home.actorId) || !this.allowedWorkspaces.has(home.tenantId)) return;
@@ -104,7 +152,37 @@ export class SlackAdapter {
     }).catch(() => undefined);
   }
 
-  private async downloadAttachments(files: readonly unknown[]): Promise<Attachment[]> {
+  private attachmentReferences(files: readonly unknown[]): Record<string, unknown>[] {
+    const references: Record<string, unknown>[] = [];
+    for (const file of files) {
+      if (references.length >= this.config.limits.maxAttachmentsPerJob) break;
+      if (typeof file !== "object" || file === null) continue;
+      const value = file as Record<string, unknown>;
+      const mimetype = typeof value.mimetype === "string" ? value.mimetype : "";
+      if (!IMAGE_MIME_TYPES.has(mimetype)) continue;
+      const candidate = typeof value.url_private_download === "string"
+        ? value.url_private_download
+        : typeof value.url_private === "string" ? value.url_private : "";
+      let url: URL;
+      try {
+        url = new URL(candidate);
+      } catch {
+        continue;
+      }
+      if (url.protocol !== "https:") continue;
+      const size = typeof value.size === "number" && Number.isFinite(value.size) ? value.size : 0;
+      if (size > this.config.limits.maxAttachmentBytes) continue;
+      references.push({
+        mimetype,
+        url_private_download: url.toString(),
+        size,
+        name: typeof value.name === "string" ? value.name : "attachment",
+      });
+    }
+    return references;
+  }
+
+  private async downloadAttachments(files: readonly unknown[], retryFailures = false): Promise<Attachment[]> {
     const maxCount = this.config.limits.maxAttachmentsPerJob;
     const maxBytes = this.config.limits.maxAttachmentBytes;
     const attachments: Attachment[] = [];
@@ -126,7 +204,10 @@ export class SlackAdapter {
           headers: { Authorization: `Bearer ${this.secrets.slackBotToken}` },
           signal: AbortSignal.timeout(30_000),
         });
-        if (!response.ok) continue;
+        if (!response.ok) {
+          if (retryFailures) throw new Error("Slack attachment download was unavailable");
+          continue;
+        }
         const buffer = await response.arrayBuffer();
         if (buffer.byteLength > maxBytes) continue;
         attachments.push({
@@ -134,7 +215,10 @@ export class SlackAdapter {
           filename,
           dataUrl: `data:${mime};base64,${Buffer.from(buffer).toString("base64")}`,
         });
-      } catch {
+      } catch (error) {
+        if (retryFailures) {
+          throw new Error("Slack attachment download failed", { cause: error });
+        }
         // Skip failed Slack downloads.
       }
     }

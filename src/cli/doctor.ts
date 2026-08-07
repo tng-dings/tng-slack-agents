@@ -39,11 +39,15 @@ async function main(): Promise<void> {
   });
   if (config.slack.enabled) {
     checks.push({
-      name: "Slack token shapes",
+      name: "Slack credential shapes",
       run: async () => {
         if (!secrets.slackBotToken?.startsWith("xoxb-")) throw new Error("SLACK_BOT_TOKEN must start with xoxb-");
-        if (!secrets.slackAppToken?.startsWith("xapp-")) throw new Error("SLACK_APP_TOKEN must start with xapp-");
-        return "present";
+        if (config.slack.ingress === "socket") {
+          if (!secrets.slackAppToken?.startsWith("xapp-")) throw new Error("SLACK_APP_TOKEN must start with xapp-");
+        } else if (!secrets.slackSigningSecret?.trim()) {
+          throw new Error("SLACK_SIGNING_SECRET must be non-empty");
+        }
+        return config.slack.ingress;
       },
     });
   }

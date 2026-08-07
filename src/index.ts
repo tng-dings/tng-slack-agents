@@ -15,6 +15,7 @@ async function main(): Promise<void> {
     secrets.openCodePassword,
     secrets.slackBotToken ?? "",
     secrets.slackAppToken ?? "",
+    secrets.slackSigningSecret ?? "",
   ], config.limits.maxAuditEventCharacters);
   const workspaces = new WorkspaceManager(config.openCode.workingRepository, config.storage.worktreeRoot);
   const executor = new OpenCodeExecutor(
@@ -25,7 +26,7 @@ async function main(): Promise<void> {
     config.limits.maxOutputCharacters + 64_000,
   );
   const authorization = new IntegrationAuthorizationPolicy(config.integrations);
-  const slack = config.slack.enabled ? new SlackGateway(config, secrets) : undefined;
+  const slack = config.slack.enabled ? new SlackGateway(config, secrets, database) : undefined;
   const reporters = new IntegrationReporterRegistry({
     ...(slack ? { slack: (job) => slack.reporter(job) } : {}),
   });
@@ -53,7 +54,7 @@ async function main(): Promise<void> {
   await runner.start();
   if (slack) {
     await slack.start();
-    console.log("Agent runner is connected to Slack through Socket Mode.");
+    console.log(`Agent runner is connected to Slack through ${config.slack.ingress}.`);
   } else {
     console.log("Agent runner started with Slack disabled.");
   }

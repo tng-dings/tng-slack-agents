@@ -6,7 +6,7 @@ The Slack gateway/coordinator and OpenCode worker are separate security principa
 
 | Component | Secrets | Required access | Explicitly excluded |
 | --- | --- | --- | --- |
-| `AgentRunner` | Slack bot/app tokens; OpenCode client password | Slack API, queue, audit data, worktree creation | Provider credentials |
+| `AgentRunner` | Slack bot token plus either app token or signing secret; OpenCode client password | Slack API, queue, audit data, worktree creation | Provider credentials |
 | `OpenCodeServer` | Provider credential; OpenCode server password | Worktrees and approved provider network | Slack credentials, queue, audit data |
 
 The duplicated OpenCode password authenticates one loopback-only connection. It is not a Slack credential. `%ProgramData%\AgentRunner\gateway-secrets.bin` and `%ProgramData%\OpenCodeWorker\worker-secrets.bin` use separate ACLs and Windows virtual service identities. The worker launcher rejects any `SLACK_*` entry as a defense-in-depth check.
@@ -15,7 +15,8 @@ The duplicated OpenCode password authenticates one loopback-only connection. It 
 
 - Slack events are accepted only from direct messages, exact configured workspace IDs, and exact configured user IDs.
 - Authorization occurs before job persistence or a `Working…` response. Slack `event_id` is the primary idempotency key, so retries do not create duplicate replies.
-- The Slack manifest requests only `assistant:write`, `chat:write`, `files:read`, and `im:history`; Socket Mode exposes no inbound HTTP endpoint.
+- The Slack manifests request only `assistant:write`, `chat:write`, `files:read`, and `im:history`. Socket Mode exposes no inbound HTTP endpoint. Events API mode verifies Slack signatures and timestamp freshness before parsing, validates the exact app/workspace/user, and durably commits authorized events before acknowledgement.
+- Events API attachment downloads and job execution occur after acknowledgement. Pending or interrupted inbox events resume after restart, processed payloads are erased, and integration-namespaced event keys suppress duplicate Slack retries.
 - OpenCode URLs are restricted to HTTP loopback literals, credentials/paths/query strings are rejected, and HTTP redirects are disabled.
 - Slack credentials never enter the worker secret bundle. Gateway Git subprocesses receive an allowlisted environment without gateway secrets.
 - Runtime-inline OpenCode policy denies external-directory access, web tools, subagents, skills, and interactive questions; unknown tools require approval and are automatically rejected. Shell/edit access remains because this is a coding worker.
@@ -35,6 +36,7 @@ The duplicated OpenCode password authenticates one loopback-only connection. It 
 - OpenCode-reported cost can arrive late or be zero. Configure a provider-side spend cap; the local cap is only a secondary control.
 - Model prompts and source content leave the machine for the approved model provider. Provider retention, training, and residency terms require separate approval.
 - Static Slack tokens remain enabled for the single-workspace MVP. The incident owner must be able to revoke and replace them immediately; automated OAuth token rotation is a later milestone.
+- Events API mode introduces a public trust boundary. Its Node HTTP listener is accepted only behind a managed TLS endpoint or hardened reverse proxy that limits request bodies, headers, connections, request duration, and rate before Bolt buffers the body.
 
 ## Mandatory operating conditions
 

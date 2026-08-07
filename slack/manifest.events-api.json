@@ -1,0 +1,60 @@
+{
+  "_metadata": {
+    "major_version": 2,
+    "minor_version": 1
+  },
+  "display_information": {
+    "name": "Company Coding Agent",
+    "description": "Runs allowlisted coding tasks on company-managed compute.",
+    "background_color": "#1F2937"
+  },
+  "features": {
+    "app_home": {
+      "home_tab_enabled": false,
+      "messages_tab_enabled": true,
+      "messages_tab_read_only_enabled": false
+    },
+    "agent_view": {
+      "agent_description": "A company-internal coding agent. Requests are queued, audited, budget-limited, and executed on company-managed hardware.",
+      "suggested_prompts": [
+        {
+          "title": "Review changes",
+          "message": "Review the current changes and report any issues."
+        },
+        {
+          "title": "Run tests",
+          "message": "Run the test suite, diagnose failures, and fix them."
+        }
+      ]
+    },
+    "bot_user": {
+      "display_name": "Company Coding Agent",
+      "always_online": false
+    }
+  },
+  "oauth_config": {
+    "scopes": {
+      "bot": [
+        "assistant:write",
+        "chat:write",
+        "files:read",
+        "im:history"
+      ]
+    }
+  },
+  "settings": {
+    "event_subscriptions": {
+      "request_url": "https://agent.example.com/slack/events",
+      "bot_events": [
+        "app_home_opened",
+        "message.im"
+      ]
+    },
+    "interactivity": {
+      "is_enabled": false
+    },
+    "org_deploy_enabled": false,
+    "socket_mode_enabled": false,
+    "token_rotation_enabled": false
+  }
+}

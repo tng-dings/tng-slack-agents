@@ -61,7 +61,10 @@ Assert-Control (Test-Path $workerSecretPath) "worker secret bundle exists"
 
 if (Test-Path $gatewaySecretPath) {
     $names = Read-SecretNames $gatewaySecretPath
-    Assert-Control ($names -contains "SLACK_BOT_TOKEN" -and $names -contains "SLACK_APP_TOKEN") "gateway bundle contains Slack credentials"
+    Assert-Control (
+        $names -contains "SLACK_BOT_TOKEN" -and
+        ($names -contains "SLACK_APP_TOKEN" -or $names -contains "SLACK_SIGNING_SECRET")
+    ) "gateway bundle contains credentials for a Slack ingress"
     $aclNames = @((Get-Acl $gatewaySecretPath).Access.IdentityReference.Value)
     Assert-Control ($aclNames -notcontains "NT SERVICE\OpenCodeServer") "worker identity cannot read gateway secret bundle"
 }
@@ -75,6 +78,16 @@ if (Test-Path $workerSecretPath) {
 
 if (Test-Path $ConfigPath) {
     $config = Get-Content -Raw $ConfigPath | ConvertFrom-Json
+    $slackIngress = if ($config.slack.ingress) { [string]$config.slack.ingress } else { "socket" }
+    if (Test-Path $gatewaySecretPath) {
+        $gatewayNames = Read-SecretNames $gatewaySecretPath
+        if ($slackIngress -eq "events-api") {
+            Assert-Control ($gatewayNames -contains "SLACK_SIGNING_SECRET") "Events API gateway bundle contains the Slack signing secret"
+        }
+        else {
+            Assert-Control ($gatewayNames -contains "SLACK_APP_TOKEN") "Socket Mode gateway bundle contains the Slack app token"
+        }
+    }
     $resolvedConfigPath = [IO.Path]::GetFullPath($ConfigPath)
     $baseUrl = [Uri]$config.openCode.baseUrl
     Assert-Control ($baseUrl.Scheme -eq "http" -and $baseUrl.Host -in @("127.0.0.1", "::1")) "OpenCode endpoint is a loopback literal"

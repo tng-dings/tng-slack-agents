@@ -14,6 +14,22 @@ export interface Attachment {
 
 export type IntegrationId = "slack" | "discord" | "local";
 
+export type InboundEventStatus = "pending" | "processing" | "processed";
+
+export interface InboundEventRecord {
+  eventKey: string;
+  integration: IntegrationId;
+  sourceEventId: string;
+  payload: unknown;
+  status: InboundEventStatus;
+  attempts: number;
+  lastError: string | null;
+  availableAt: string;
+  receivedAt: string;
+  updatedAt: string;
+  processedAt: string | null;
+}
+
 export interface JobRecord {
   id: string;
   integration: IntegrationId;

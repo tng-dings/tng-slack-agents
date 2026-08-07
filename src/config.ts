@@ -7,14 +7,24 @@ export interface IntegrationAuthorization {
   allowedActors: string[];
 }
 
+export type SlackIngressTransport = "socket" | "events-api";
+
 export interface RunnerConfig {
   integrations: Partial<Record<IntegrationId, IntegrationAuthorization>>;
   slack: {
     enabled: boolean;
+    ingress: SlackIngressTransport;
+    appId?: string;
     allowedWorkspaceIds: string[];
     allowedUserIds: string[];
     liveUpdates: boolean;
     nativeStreaming: boolean;
+    http: {
+      host: string;
+      port: number;
+      eventsPath: string;
+      healthPath: string;
+    };
   };
   openCode: {
     baseUrl: string;
@@ -48,6 +58,7 @@ export interface RunnerConfig {
 export interface RunnerSecrets {
   slackBotToken?: string;
   slackAppToken?: string;
+  slackSigningSecret?: string;
   openCodePassword: string;
 }
 
@@ -67,6 +78,10 @@ const defaults = {
   maxAttachmentBytes: 5_000_000,
   retentionDays: 30,
   pollIntervalMs: 250,
+  slackHttpHost: "127.0.0.1",
+  slackHttpPort: 3000,
+  slackEventsPath: "/slack/events",
+  healthPath: "/healthz",
 } as const;
 
 function object(value: unknown, name: string): Record<string, unknown> {
@@ -95,11 +110,33 @@ function positiveInteger(value: unknown, fallback: number, name: string): number
   return result;
 }
 
+function tcpPort(value: unknown, fallback: number, name: string): number {
+  const result = positiveInteger(value, fallback, name);
+  if (result > 65_535) throw new Error(`${name} must be at most 65535`);
+  return result;
+}
+
 function stringArray(value: unknown, name: string): string[] {
   if (!Array.isArray(value) || value.some((item) => typeof item !== "string" || !item.trim())) {
     throw new Error(`${name} must be an array of non-empty strings`);
   }
   return [...value] as string[];
+}
+
+function slackIngress(value: unknown): SlackIngressTransport {
+  const result = value ?? "socket";
+  if (result !== "socket" && result !== "events-api") {
+    throw new Error('slack.ingress must be "socket" or "events-api"');
+  }
+  return result;
+}
+
+function routePath(value: unknown, fallback: string, name: string): string {
+  const result = value ?? fallback;
+  if (typeof result !== "string" || !/^\/[A-Za-z0-9/_-]*$/.test(result)) {
+    throw new Error(`${name} must be an absolute URL path without a query or fragment`);
+  }
+  return result;
 }
 
 function loopbackBaseUrl(value: unknown): string {
@@ -123,17 +160,26 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
   const absoluteConfigPath = path.resolve(configPath);
   const root = object(JSON.parse(await readFile(absoluteConfigPath, "utf8")), "config");
   const slack = object(root.slack, "slack");
+  const slackHttp = object(slack.http ?? {}, "slack.http");
   const openCode = object(root.openCode, "openCode");
   const limits = object(root.limits ?? {}, "limits");
   const storage = object(root.storage, "storage");
   const queue = object(root.queue ?? {}, "queue");
   const baseDirectory = path.dirname(absoluteConfigPath);
   const enabled = slack.enabled !== false;
+  const ingress = slackIngress(slack.ingress);
+  const appId = typeof slack.appId === "string" && slack.appId.trim() ? slack.appId.trim() : undefined;
   const allowedWorkspaceIds = stringArray(slack.allowedWorkspaceIds ?? [], "slack.allowedWorkspaceIds");
   const allowedUserIds = stringArray(slack.allowedUserIds, "slack.allowedUserIds");
   if (enabled && allowedWorkspaceIds.length === 0) throw new Error("slack.allowedWorkspaceIds must not be empty when Slack is enabled");
   if (enabled && allowedUserIds.length === 0) throw new Error("slack.allowedUserIds must not be empty when Slack is enabled");
+  if (enabled && ingress === "events-api" && !appId) {
+    throw new Error("slack.appId is required when Slack Events API ingress is enabled");
+  }
   if (slack.nativeStreaming === true) throw new Error("slack.nativeStreaming is disabled because streamed output cannot be safely redacted");
+  const eventsPath = routePath(slackHttp.eventsPath, defaults.slackEventsPath, "slack.http.eventsPath");
+  const healthPath = routePath(slackHttp.healthPath, defaults.healthPath, "slack.http.healthPath");
+  if (eventsPath === healthPath) throw new Error("slack.http.eventsPath and slack.http.healthPath must differ");
 
   let model: RunnerConfig["openCode"]["model"];
   if (openCode.model !== undefined) {
@@ -150,10 +196,20 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
     },
     slack: {
       enabled,
+      ingress,
+      ...(appId ? { appId } : {}),
       allowedWorkspaceIds,
       allowedUserIds,
       liveUpdates: slack.liveUpdates === true,
       nativeStreaming: false,
+      http: {
+        host: typeof slackHttp.host === "string" && slackHttp.host.trim()
+          ? slackHttp.host.trim()
+          : defaults.slackHttpHost,
+        port: tcpPort(slackHttp.port, defaults.slackHttpPort, "slack.http.port"),
+        eventsPath,
+        healthPath,
+      },
     },
     openCode: {
       baseUrl: loopbackBaseUrl(openCode.baseUrl),
@@ -192,13 +248,21 @@ export function loadSecrets(config: RunnerConfig): RunnerSecrets {
   if (!openCodePassword) throw new Error("OPENCODE_SERVER_PASSWORD is required");
   const slackBotToken = process.env.SLACK_BOT_TOKEN;
   const slackAppToken = process.env.SLACK_APP_TOKEN;
-  if (config.slack.enabled && (!slackBotToken || !slackAppToken)) {
-    throw new Error("SLACK_BOT_TOKEN and SLACK_APP_TOKEN are required when Slack is enabled");
+  const slackSigningSecret = process.env.SLACK_SIGNING_SECRET;
+  if (config.slack.enabled && !slackBotToken) {
+    throw new Error("SLACK_BOT_TOKEN is required when Slack is enabled");
+  }
+  if (config.slack.enabled && config.slack.ingress === "socket" && !slackAppToken) {
+    throw new Error("SLACK_APP_TOKEN is required when Slack Socket Mode ingress is enabled");
+  }
+  if (config.slack.enabled && config.slack.ingress === "events-api" && !slackSigningSecret) {
+    throw new Error("SLACK_SIGNING_SECRET is required when Slack Events API ingress is enabled");
   }
   return {
     openCodePassword,
     ...(slackBotToken ? { slackBotToken } : {}),
     ...(slackAppToken ? { slackAppToken } : {}),
+    ...(slackSigningSecret ? { slackSigningSecret } : {}),
   };
 }
 

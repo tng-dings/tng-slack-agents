@@ -31,14 +31,17 @@ or `"ingress": "events-api"`. Exact names may follow existing configuration conv
 
 ## Current baseline
 
-- [`src/slack.ts`](../src/slack.ts) combines Socket Mode lifecycle, event parsing, authorization, attachment download, denial responses, and Slack result delivery.
-- [`src/runner.ts`](../src/runner.ts) owns durable submission, limits, queueing, execution, and reporting, but currently reads Slack allowlists directly.
-- [`src/types.ts`](../src/types.ts) provides useful `Executor`, `JobReporter`, and `ReporterFactory` seams, while persisted job/session identities still use Slack names such as `workspaceId`, `channelId`, and `threadTs`.
-- [`src/database.ts`](../src/database.ts) provides SQLite persistence, source-event deduplication, and per-session serialization.
-- [`src/index.ts`](../src/index.ts) assumes one optional Slack gateway and selects its reporter globally.
-- [`src/opencode.ts`](../src/opencode.ts) requires a loopback OpenCode server and local worktree path.
+Milestone 1 is complete. The service now has an integration-aware orchestration boundary while preserving the existing Slack Socket Mode behavior:
 
-These are the constraints to improve, not reasons to replace the working queue and executor.
+- [`src/slack.ts`](../src/slack.ts) selects either the Socket Mode or Events API ingress while sharing Slack behavior from [`src/slack/normalization.ts`](../src/slack/normalization.ts), [`src/slack/adapter.ts`](../src/slack/adapter.ts), and [`src/slack/delivery.ts`](../src/slack/delivery.ts).
+- [`src/runner.ts`](../src/runner.ts) owns durable submission, limits, queueing, execution, and delivery lifecycle. Authorization and reporter selection are injected; the runner does not read Slack configuration or choose a Slack reporter.
+- [`src/types.ts`](../src/types.ts) defines normalized integration, tenant, conversation, thread, actor, and source-event identities alongside the existing executor and reporter seams.
+- [`src/database.ts`](../src/database.ts) persists normalized identities and integration-namespaced source-event/session keys. Its additive, idempotent migration backfills existing rows as Slack records and retains legacy Slack columns for compatibility during this milestone. A durable inbound-event inbox now separates HTTP acceptance from attachment retrieval and job submission.
+- [`src/integrations.ts`](../src/integrations.ts) routes delivery using the integration persisted on each job. Missing integrations fail closed and are audited; console delivery must be explicitly registered for local or smoke usage.
+- [`src/index.ts`](../src/index.ts) composes the integration-aware policy and reporter registry and starts exactly one configured Slack ingress: `socket` or `events-api`. The Events API path uses Bolt's signature-verifying `HTTPReceiver` and commits authorized events before releasing the HTTP acknowledgement.
+- [`src/opencode.ts`](../src/opencode.ts) still requires a loopback OpenCode server and local worktree path. Replacing that runtime boundary is not required for Slack HTTPS ingress.
+
+The durable queue and executor remain the foundation. The remaining HTTPS work is production-edge hardening and deployment evidence rather than another orchestration path.
 
 ## Target boundary
 
@@ -205,15 +208,15 @@ References:
 
 **Primary files:** Slack ingress/composition code, configuration/secrets, HTTP ingress tests.
 
-- [ ] Add the Slack Events API receiver using Slack Bolt's supported HTTP receiver unless a concrete limitation requires a custom server.
-- [ ] Verify Slack signatures against the unmodified raw request body and `SLACK_SIGNING_SECRET`.
-- [ ] Enforce Slack's request timestamp freshness/replay protection through the receiver or explicit validation.
-- [ ] Keep Bolt signature verification explicitly enabled in production; never disable it merely because a load balancer or reverse proxy is present.
-- [ ] Validate the expected Slack app ID, workspace, user, event type, DM context, and bot/subtype rules after request authentication. A valid Slack signature proves origin, not user authorization.
-- [ ] Support Slack URL-verification challenges.
-- [ ] Expose a dedicated health endpoint that does not reveal configuration or secret state.
-- [ ] Configure host/port/path explicitly for reverse-proxy or load-balancer deployment.
-- [ ] Do not log request bodies, signatures, tokens, prompts, or attachment contents.
+- [x] Add the Slack Events API receiver using Slack Bolt's supported HTTP receiver unless a concrete limitation requires a custom server.
+- [x] Verify Slack signatures against the unmodified raw request body and `SLACK_SIGNING_SECRET`.
+- [x] Enforce Slack's request timestamp freshness/replay protection through the receiver or explicit validation.
+- [x] Keep Bolt signature verification explicitly enabled in production; never disable it merely because a load balancer or reverse proxy is present.
+- [x] Validate the expected Slack app ID, workspace, user, event type, DM context, and bot/subtype rules after request authentication. A valid Slack signature proves origin, not user authorization.
+- [x] Support Slack URL-verification challenges.
+- [x] Expose a dedicated health endpoint that does not reveal configuration or secret state.
+- [x] Configure host/port/path explicitly for reverse-proxy or load-balancer deployment.
+- [x] Do not log request bodies, signatures, tokens, prompts, or attachment contents.
 
 **Acceptance criteria**
 
@@ -226,15 +229,15 @@ References:
 
 **Primary files:** Slack HTTPS ingress, submission lifecycle if needed, tests.
 
-- [ ] Ensure Slack receives an acknowledgement inside its deadline without waiting for OpenCode, attachment downloads, result delivery, or a Slack `Working…` API call.
-- [ ] Verify the selected Bolt receiver's acknowledgement behavior with an intentionally delayed listener test; do not assume it.
-- [ ] Preserve durable `event_id` deduplication and namespace it as Slack.
-- [ ] Test duplicate and retry headers, including a retry arriving while the original job is queued or running.
-- [ ] If acknowledgement must precede durable job insertion, explicitly document and test the small crash-loss window or add a durable inbound-event inbox. Do not claim at-least-once acceptance without one.
+- [x] Ensure Slack receives an acknowledgement inside its deadline without waiting for OpenCode, attachment downloads, result delivery, or a Slack `Working…` API call.
+- [x] Verify the selected Bolt receiver's acknowledgement behavior with an intentionally delayed downstream processor test; do not assume it. The request listener itself is intentionally limited to validation and the inbox commit.
+- [x] Preserve durable `event_id` deduplication and namespace it as Slack.
+- [x] Test duplicate and retry headers, including a retry arriving while the original event is still processing.
+- [x] Commit authorized events to a durable inbound-event inbox before acknowledgement. Recover interrupted inbox work after restart and rely on namespaced job insertion for idempotent handoff.
 
 **Acceptance criteria**
 
-- A deliberately slow event handler still receives a timely HTTP acknowledgement.
+- A deliberately slow downstream event processor still receives a timely HTTP acknowledgement after the inbox commit.
 - Multiple deliveries of one Slack event create one job and at most one `Working…` reply.
 - The documented durability guarantee matches the implementation.
 
@@ -242,13 +245,13 @@ References:
 
 **Primary files:** `config.example.json`, `slack/manifest.json`, `README.md`, `docs/`.
 
-- [ ] Make `SLACK_APP_TOKEN` mandatory only for Socket Mode.
-- [ ] Make `SLACK_SIGNING_SECRET` mandatory only for Events API mode.
-- [ ] Update the Slack manifest for HTTPS deployment or provide separate clearly named manifests if one manifest cannot safely represent both modes.
-- [ ] Document Request URL setup, TLS/reverse-proxy expectations, health checking, and local testing.
-- [ ] Update the security model: HTTPS adds a public trust boundary that Socket Mode intentionally avoids.
-- [ ] Add signature failure, replay, rate limiting, request-size, and denial-of-service considerations to the security review.
-- [ ] Preserve the existing Socket Mode administrator/testing path.
+- [x] Make `SLACK_APP_TOKEN` mandatory only for Socket Mode.
+- [x] Make `SLACK_SIGNING_SECRET` mandatory only for Events API mode.
+- [x] Update the Slack manifest for HTTPS deployment or provide separate clearly named manifests if one manifest cannot safely represent both modes.
+- [x] Document Request URL setup, TLS/reverse-proxy expectations, health checking, and local testing.
+- [x] Update the security model: HTTPS adds a public trust boundary that Socket Mode intentionally avoids.
+- [x] Add signature failure, replay, rate limiting, request-size, and denial-of-service considerations to the security review.
+- [x] Preserve the existing Socket Mode administrator/testing path.
 
 **Milestone 2 exit criteria**
 
@@ -347,32 +350,25 @@ Candidate architecture:
 
 Before implementation, specify worker leases, heartbeats, visibility-timeout extension, poison-job handling, session/worktree affinity, cancellation, delivery retries, and exactly-once claims. SQS alone does not replace the current transactional queue, concurrency policy, or session database.
 
-## Parallel work coordination
+## Implementation sequencing
 
-Parallel agents should claim one work package and avoid overlapping primary files. Post the claimed package and files before editing.
-
-Suggested dependency graph:
+Milestone 1 packages M1-A through M1-D are complete. The remaining dependency graph is:
 
 ```text
-M1-A normalized persistence ----\
-                                +--> M1-D composition/routing --> M2 HTTPS ingress
-M1-B generic authorization ----/
+M1 integration seam (complete) --> M2-A/B receiver, acknowledgement, deduplication
+                                         |
+                                         v
+                                  M2-C docs/manifest
+                                         |
+                                         v
+                                  M2-D edge hardening --> M3 AWS lift
 
-M1-C Slack separation -------------------------------/
-
-M2 tests/receiver --> M2 docs/manifest --> M3 AWS lift
-M1 + M2 --------------------------------> M4 Discord
+M1 + M2 ---------------------------------------------> M4 Discord
 ```
 
-Safe parallelism after normalized contracts are agreed:
+M2-A through M2-C are implemented with the durable-inbox acknowledgement guarantee recorded below. M2-D remains open because it requires deployment-edge controls and evidence in addition to application tests.
 
-- **Agent A:** M1-A database migration and persistence tests.
-- **Agent B:** M1-B authorization/config boundary.
-- **Agent C:** M1-C Slack normalization and adapter tests.
-- **Integrator:** M1-D composition, conflict resolution, and full verification.
-- After M1 integration, one agent can own M2-A/B while another prepares M2-C documentation against the finalized configuration.
-
-Each package must return:
+If work is split across contributors, each contributor should claim one work package and avoid overlapping primary files. Each package must return:
 
 1. files changed;
 2. behavior and migration decisions;
@@ -382,11 +378,14 @@ Each package must return:
 
 The integrator must run `npm run check`, `npm test`, and `npm run build` after combining each milestone. Live Slack or AWS checks supplement but do not replace automated receiver, normalization, migration, and deduplication tests.
 
+## Decisions resolved
+
+- Normalized identity columns remain additive for one compatibility milestone; normalized columns and integration-namespaced keys are authoritative for new reads and writes.
+- Slack Events API acknowledgement is released only after an authorized event is committed to the SQLite inbound inbox. The receiver does not wait for attachment downloads, job submission, OpenCode, or Slack API calls. Inbox recovery plus idempotent job submission provides durable at-least-once internal processing without claiming exactly-once external delivery.
+
 ## Decisions intentionally deferred
 
-- Whether normalized identity columns replace legacy Slack columns immediately or remain additive for one compatibility milestone.
 - Whether persisted reply context is typed platform columns or a versioned, validated JSON envelope.
-- Whether HTTP acknowledgement plus asynchronous in-process submission is an acceptable MVP durability window or requires a durable inbound-event inbox.
 - The exact AWS compute choice between EC2 and ECS-on-EC2.
 - Discord slash-command syntax and whether a later Discord Gateway transport is needed.
 - Shared-database and queue technology for distributed execution.
