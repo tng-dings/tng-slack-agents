@@ -148,12 +148,12 @@ This milestone should preserve user-visible behavior. Complete its contracts bef
 
 **Primary files:** `src/slack.ts` and, only if separation materially improves ownership, a small number of `src/slack/` modules.
 
-- [ ] Extract Slack event normalization so Socket Mode and HTTPS use exactly the same DM, subtype, prompt, thread, workspace, and attachment rules.
-- [ ] Keep Slack attachment limits and authenticated downloads in the Slack adapter.
-- [ ] Keep `SlackJobReporter` as the Slack delivery implementation.
-- [ ] Preserve app-home suggested prompts for both Slack ingress modes where Slack supports them.
-- [ ] Keep unauthorized denial throttling platform-local.
-- [ ] Do not introduce a dynamic plugin loader or registration framework.
+- [x] Extract Slack event normalization so Socket Mode and HTTPS use exactly the same DM, subtype, prompt, thread, workspace, and attachment rules.
+- [x] Keep Slack attachment limits and authenticated downloads in the Slack adapter.
+- [x] Keep `SlackJobReporter` as the Slack delivery implementation.
+- [x] Preserve app-home suggested prompts for both Slack ingress modes where Slack supports them.
+- [x] Keep unauthorized denial throttling platform-local.
+- [x] Do not introduce a dynamic plugin loader or registration framework.
 
 **Acceptance criteria**
 
