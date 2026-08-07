@@ -4,7 +4,7 @@ import type { RunnerDatabase } from "./database.js";
 import type { AgentRunner } from "./runner.js";
 import type { JobRecord, JobReporter } from "./types.js";
 import { SlackAdapter } from "./slack/adapter.js";
-import { SlackHttpIngress } from "./slack/http-ingress.js";
+import { SlackHttpIngress, SlackHttpSecurityLogger } from "./slack/http-ingress.js";
 import { SlackDurableEventHandler } from "./slack/inbox.js";
 import { SlackSocketIngress } from "./slack/socket-ingress.js";
 
@@ -21,7 +21,13 @@ export {
   type SlackMessageParseResult,
 } from "./slack/normalization.js";
 export { SlackSocketIngress, type SlackEventHandler } from "./slack/socket-ingress.js";
-export { SlackHttpIngress } from "./slack/http-ingress.js";
+export {
+  defaultSlackHttpHardening,
+  hardenSlackRequestListener,
+  SlackHttpIngress,
+  SlackHttpSecurityLogger,
+  type SlackHttpHardeningOptions,
+} from "./slack/http-ingress.js";
 export { SlackDurableEventHandler } from "./slack/inbox.js";
 
 /** Selects one Slack ingress while sharing normalization, processing, and delivery. */
@@ -48,6 +54,7 @@ export class SlackGateway {
       receiver = new HTTPReceiver({
         signingSecret: secrets.slackSigningSecret!,
         endpoints: config.slack.http.eventsPath,
+        logger: new SlackHttpSecurityLogger(),
         processBeforeResponse: true,
         signatureVerification: true,
         customRoutes: [{
@@ -74,6 +81,7 @@ export class SlackGateway {
         handler,
         config.slack.http.host,
         config.slack.http.port,
+        config.slack.http,
       );
     } else {
       this.ingress = new SlackSocketIngress(this.app, this.adapter);

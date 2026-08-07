@@ -17,6 +17,13 @@ export function testConfig(root: string): RunnerConfig {
         port: 3000,
         eventsPath: "/slack/events",
         healthPath: "/healthz",
+        maxBodyBytes: 256 * 1024,
+        maxHeaderBytes: 16 * 1024,
+        requestTimeoutMs: 5_000,
+        headersTimeoutMs: 5_000,
+        keepAliveTimeoutMs: 5_000,
+        maxRequestsPerSocket: 100,
+        maxConnections: 100,
       },
     },
     openCode: {

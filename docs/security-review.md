@@ -14,6 +14,8 @@ The initial approval path below remains Socket Mode. An Events API deployment in
 
 In Events API mode, a managed TLS endpoint or hardened reverse proxy is the only internet-facing component. It forwards only `POST /slack/events` and the minimal health route to the private Node listener and enforces request-body, header, connection, request-time, and rate limits before Bolt buffers a request. Source IP allowlisting is not a substitute for Slack signature verification.
 
+The reviewed M2-D deployment is the version-controlled NGINX configuration in [`deploy/nginx/slack-edge.conf`](../deploy/nginx/slack-edge.conf), with the runbook and evidence procedure in [`public-endpoint-hardening.md`](public-endpoint-hardening.md). Application configuration permits only a loopback Bolt bind. NGINX buffers at most 256 KiB, constrains headers/connections/time, rate-limits both per source and globally, and logs no headers, query strings, or bodies. Receiver rejection logs are content-free and bounded. Production approval remains conditional on archived TLS, firewall/reachability, time-sync, and log-search evidence from the deployed host.
+
 Bolt verifies the unmodified request body, signature, and timestamp before dispatch. The adapter then validates the exact app ID, workspace, user, direct-message context, event type, and bot/subtype rules. Authorized messages are committed to a namespaced SQLite inbox before HTTP 200 is released. Attachment retrieval, job creation, and Slack delivery happen asynchronously; pending or interrupted inbox events recover after restart, and existing event/job keys make Slack retries idempotent. Invalid, stale, malformed, wrong-app, and unauthorized requests create no job.
 
 ## Data flow

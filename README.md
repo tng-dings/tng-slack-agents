@@ -60,7 +60,7 @@ Only exact workspace IDs in `slack.allowedWorkspaceIds` and user IDs in `slack.a
 
 ## Slack Events API development run
 
-Set `slack.ingress` to `"events-api"`, set `slack.appId` to the exact Slack application ID, and configure `slack.http.host`, `port`, `eventsPath`, and `healthPath`. Use [slack/manifest.events-api.json](slack/manifest.events-api.json) after replacing its example Request URL with the managed public TLS URL. The public edge must forward only the events and health paths to the private Node listener.
+Set `slack.ingress` to `"events-api"`, set `slack.appId` to the exact Slack application ID, keep `slack.http.host` at the reviewed `127.0.0.1` address, and configure `port`, `eventsPath`, and `healthPath`. Use [slack/manifest.events-api.json](slack/manifest.events-api.json) after replacing its example Request URL with the managed public TLS URL. The public edge must forward only the events and health paths to the private Node listener.
 
 ```powershell
 $env:OPENCODE_SERVER_PASSWORD = '<server-password>'
@@ -73,6 +73,8 @@ npm run dev
 `SLACK_APP_TOKEN` is not required in this mode. Bolt verifies the raw request signature and timestamp. Authorized message events are normalized and committed to the SQLite inbound inbox before the HTTP 200 response is released. Attachment downloads, job submission, and Slack replies occur asynchronously. Pending or interrupted inbox work resumes after restart, while the existing namespaced job key prevents a retried event from creating a second job or initial reply.
 
 The built-in listener is plain HTTP and must not be exposed directly to the internet. Terminate TLS and enforce body, header, connection, request-time, and rate limits at a managed load balancer or hardened reverse proxy.
+
+Production Events API deployments must follow the [public endpoint hardening runbook](docs/public-endpoint-hardening.md). The supplied NGINX configuration exposes only the exact event and health routes, buffers and limits requests before Bolt, applies connection/rate limits, and proxies to the loopback-only Node listener.
 
 ## Verification
 

@@ -13,10 +13,11 @@
     "doctor": "tsx src/cli/doctor.ts",
     "start": "node dist/src/index.js",
     "smoke": "tsx src/cli/smoke.ts",
-    "test": "npm run build && node --test --test-isolation=none --test-concurrency=1 dist/test/opencode.test.js dist/test/reporter-routing.test.js dist/test/runner.test.js dist/test/security.test.js dist/test/slack.test.js dist/test/slack-http.test.js"
+    "security:audit": "npm audit --audit-level=high",
+    "test": "npm run build && node --test --test-isolation=none --test-concurrency=1 dist/test/edge-hardening.test.js dist/test/opencode.test.js dist/test/reporter-routing.test.js dist/test/runner.test.js dist/test/security.test.js dist/test/slack.test.js dist/test/slack-http.test.js"
   },
   "dependencies": {
-    "@slack/bolt": "^4.4.0",
+    "@slack/bolt": "^4.7.3",
     "@slack/web-api": "^7.19.0"
   },
   "devDependencies": {

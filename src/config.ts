@@ -24,6 +24,13 @@ export interface RunnerConfig {
       port: number;
       eventsPath: string;
       healthPath: string;
+      maxBodyBytes: number;
+      maxHeaderBytes: number;
+      requestTimeoutMs: number;
+      headersTimeoutMs: number;
+      keepAliveTimeoutMs: number;
+      maxRequestsPerSocket: number;
+      maxConnections: number;
     };
   };
   openCode: {
@@ -82,6 +89,13 @@ const defaults = {
   slackHttpPort: 3000,
   slackEventsPath: "/slack/events",
   healthPath: "/healthz",
+  slackHttpMaxBodyBytes: 256 * 1024,
+  slackHttpMaxHeaderBytes: 16 * 1024,
+  slackHttpRequestTimeoutMs: 5_000,
+  slackHttpHeadersTimeoutMs: 5_000,
+  slackHttpKeepAliveTimeoutMs: 5_000,
+  slackHttpMaxRequestsPerSocket: 100,
+  slackHttpMaxConnections: 100,
 } as const;
 
 function object(value: unknown, name: string): Record<string, unknown> {
@@ -110,6 +124,12 @@ function positiveInteger(value: unknown, fallback: number, name: string): number
   return result;
 }
 
+function boundedPositiveInteger(value: unknown, fallback: number, maximum: number, name: string): number {
+  const result = positiveInteger(value, fallback, name);
+  if (result > maximum) throw new Error(`${name} must be at most ${maximum}`);
+  return result;
+}
+
 function tcpPort(value: unknown, fallback: number, name: string): number {
   const result = positiveInteger(value, fallback, name);
   if (result > 65_535) throw new Error(`${name} must be at most 65535`);
@@ -135,6 +155,14 @@ function routePath(value: unknown, fallback: string, name: string): string {
   const result = value ?? fallback;
   if (typeof result !== "string" || !/^\/[A-Za-z0-9/_-]*$/.test(result)) {
     throw new Error(`${name} must be an absolute URL path without a query or fragment`);
+  }
+  return result;
+}
+
+function privateHttpHost(value: unknown): string {
+  const result = typeof value === "string" && value.trim() ? value.trim() : defaults.slackHttpHost;
+  if (result !== defaults.slackHttpHost) {
+    throw new Error("slack.http.host must be the reviewed loopback IPv4 literal 127.0.0.1");
   }
   return result;
 }
@@ -180,6 +208,21 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
   const eventsPath = routePath(slackHttp.eventsPath, defaults.slackEventsPath, "slack.http.eventsPath");
   const healthPath = routePath(slackHttp.healthPath, defaults.healthPath, "slack.http.healthPath");
   if (eventsPath === healthPath) throw new Error("slack.http.eventsPath and slack.http.healthPath must differ");
+  const requestTimeoutMs = boundedPositiveInteger(
+    slackHttp.requestTimeoutMs,
+    defaults.slackHttpRequestTimeoutMs,
+    defaults.slackHttpRequestTimeoutMs,
+    "slack.http.requestTimeoutMs",
+  );
+  const headersTimeoutMs = boundedPositiveInteger(
+    slackHttp.headersTimeoutMs,
+    defaults.slackHttpHeadersTimeoutMs,
+    defaults.slackHttpHeadersTimeoutMs,
+    "slack.http.headersTimeoutMs",
+  );
+  if (headersTimeoutMs > requestTimeoutMs) {
+    throw new Error("slack.http.headersTimeoutMs must be less than or equal to slack.http.requestTimeoutMs");
+  }
 
   let model: RunnerConfig["openCode"]["model"];
   if (openCode.model !== undefined) {
@@ -203,12 +246,17 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
       liveUpdates: slack.liveUpdates === true,
       nativeStreaming: false,
       http: {
-        host: typeof slackHttp.host === "string" && slackHttp.host.trim()
-          ? slackHttp.host.trim()
-          : defaults.slackHttpHost,
+        host: privateHttpHost(slackHttp.host),
         port: tcpPort(slackHttp.port, defaults.slackHttpPort, "slack.http.port"),
         eventsPath,
         healthPath,
+        maxBodyBytes: boundedPositiveInteger(slackHttp.maxBodyBytes, defaults.slackHttpMaxBodyBytes, defaults.slackHttpMaxBodyBytes, "slack.http.maxBodyBytes"),
+        maxHeaderBytes: boundedPositiveInteger(slackHttp.maxHeaderBytes, defaults.slackHttpMaxHeaderBytes, defaults.slackHttpMaxHeaderBytes, "slack.http.maxHeaderBytes"),
+        requestTimeoutMs,
+        headersTimeoutMs,
+        keepAliveTimeoutMs: boundedPositiveInteger(slackHttp.keepAliveTimeoutMs, defaults.slackHttpKeepAliveTimeoutMs, defaults.slackHttpKeepAliveTimeoutMs, "slack.http.keepAliveTimeoutMs"),
+        maxRequestsPerSocket: boundedPositiveInteger(slackHttp.maxRequestsPerSocket, defaults.slackHttpMaxRequestsPerSocket, defaults.slackHttpMaxRequestsPerSocket, "slack.http.maxRequestsPerSocket"),
+        maxConnections: boundedPositiveInteger(slackHttp.maxConnections, defaults.slackHttpMaxConnections, defaults.slackHttpMaxConnections, "slack.http.maxConnections"),
       },
     },
     openCode: {

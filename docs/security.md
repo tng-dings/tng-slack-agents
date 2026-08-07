@@ -17,6 +17,8 @@ The duplicated OpenCode password authenticates one loopback-only connection. It 
 - Authorization occurs before job persistence or a `Working…` response. Slack `event_id` is the primary idempotency key, so retries do not create duplicate replies.
 - The Slack manifests request only `assistant:write`, `chat:write`, `files:read`, and `im:history`. Socket Mode exposes no inbound HTTP endpoint. Events API mode verifies Slack signatures and timestamp freshness before parsing, validates the exact app/workspace/user, and durably commits authorized events before acknowledgement.
 - Events API attachment downloads and job execution occur after acknowledgement. Pending or interrupted inbox events resume after restart, processed payloads are erased, and integration-namespaced event keys suppress duplicate Slack retries.
+- Events API production configuration binds Bolt to the reviewed `127.0.0.1` listener used by the supplied edge. The reviewed NGINX edge terminates TLS, exposes only the exact event and health routes, buffers at most 256 KiB before proxying, bounds headers/connections/time, and applies per-source and global rate limits.
+- The private listener repeats the reviewed body/header/time/connection bounds before Bolt dispatch. Receiver rejection logs contain only rate-limited fixed categories, never parser text or request-controlled content.
 - OpenCode URLs are restricted to HTTP loopback literals, credentials/paths/query strings are rejected, and HTTP redirects are disabled.
 - Slack credentials never enter the worker secret bundle. Gateway Git subprocesses receive an allowlisted environment without gateway secrets.
 - Runtime-inline OpenCode policy denies external-directory access, web tools, subagents, skills, and interactive questions; unknown tools require approval and are automatically rejected. Shell/edit access remains because this is a coding worker.
@@ -37,6 +39,7 @@ The duplicated OpenCode password authenticates one loopback-only connection. It 
 - Model prompts and source content leave the machine for the approved model provider. Provider retention, training, and residency terms require separate approval.
 - Static Slack tokens remain enabled for the single-workspace MVP. The incident owner must be able to revoke and replace them immediately; automated OAuth token rotation is a later milestone.
 - Events API mode introduces a public trust boundary. Its Node HTTP listener is accepted only behind a managed TLS endpoint or hardened reverse proxy that limits request bodies, headers, connections, request duration, and rate before Bolt buffers the body.
+- Edge certificate installation, firewall/load-balancer state, time synchronization, and externally observed reachability remain deployment controls and require the evidence in `docs/public-endpoint-hardening.md`.
 
 ## Mandatory operating conditions
 

@@ -10,7 +10,14 @@
       "host": "127.0.0.1",
       "port": 3000,
       "eventsPath": "/slack/events",
-      "healthPath": "/healthz"
+      "healthPath": "/healthz",
+      "maxBodyBytes": 262144,
+      "maxHeaderBytes": 16384,
+      "requestTimeoutMs": 5000,
+      "headersTimeoutMs": 5000,
+      "keepAliveTimeoutMs": 5000,
+      "maxRequestsPerSocket": 100,
+      "maxConnections": 100
     }
   },
   "openCode": {

@@ -93,11 +93,37 @@ test("Events API configuration requires an app ID and explicit HTTP routes", asy
   const loaded = await loadConfig(filename);
   assert.equal(loaded.slack.ingress, "events-api");
   assert.equal(loaded.slack.http.port, 4000);
+  assert.equal(loaded.slack.http.host, "127.0.0.1");
+  assert.equal(loaded.slack.http.maxBodyBytes, 256 * 1024);
+  assert.equal(loaded.slack.http.maxHeaderBytes, 16 * 1024);
   await writeFile(filename, JSON.stringify({
     ...config,
     slack: { ...config.slack, appId: "A1", http: { ...config.slack.http, port: 65_536 } },
   }));
   await assert.rejects(loadConfig(filename), /slack\.http\.port must be at most 65535/);
+  await writeFile(filename, JSON.stringify({
+    ...config,
+    slack: { ...config.slack, appId: "A1", http: { ...config.slack.http, host: "0.0.0.0" } },
+  }));
+  await assert.rejects(loadConfig(filename), /reviewed loopback IPv4 literal/);
+  await writeFile(filename, JSON.stringify({
+    ...config,
+    slack: { ...config.slack, appId: "A1", http: { ...config.slack.http, host: "::1" } },
+  }));
+  await assert.rejects(loadConfig(filename), /reviewed loopback IPv4 literal/);
+  await writeFile(filename, JSON.stringify({
+    ...config,
+    slack: { ...config.slack, appId: "A1", http: { ...config.slack.http, maxBodyBytes: 262_145 } },
+  }));
+  await assert.rejects(loadConfig(filename), /slack\.http\.maxBodyBytes must be at most 262144/);
+  await writeFile(filename, JSON.stringify({
+    ...config,
+    slack: { ...config.slack, appId: "A1", http: { ...config.slack.http, requestTimeoutMs: 100 } },
+  }));
+  await assert.rejects(
+    loadConfig(filename),
+    /slack\.http\.headersTimeoutMs must be less than or equal to slack\.http\.requestTimeoutMs/,
+  );
   await rm(root, { recursive: true, force: true });
 });
 

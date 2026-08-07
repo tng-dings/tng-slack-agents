@@ -264,16 +264,18 @@ References:
 
 **Primary files:** deployment configuration, HTTP ingress tests, security and operator documentation.
 
-- [ ] Terminate TLS at a managed load balancer or hardened reverse proxy; do not directly expose the Node receiver to the internet.
-- [ ] Make the Bolt service reachable only from that trusted edge component.
-- [ ] Publicly route only `POST /slack/events` and a minimal health endpoint. Return no configuration, dependency, credential, or detailed failure data from health checks.
-- [ ] Enforce request-body, header, connection, and request-time limits before Bolt buffers the body. Slack event payloads contain file metadata rather than attachment binaries, so determine a small bound from representative payload tests.
-- [ ] Add edge rate limiting and, for AWS, evaluate AWS WAF rules for malformed/flood traffic. Slack signatures remain the source-authentication mechanism; do not depend on source IP allowlisting as a substitute.
-- [ ] Keep system time synchronized because request freshness validation depends on it.
-- [ ] Store the signing secret in the existing protected bundle or cloud secret manager, exclude it from logs and OpenCode's environment, and document rotation.
-- [ ] Ensure rejected signatures and malformed requests cannot cause unbounded log volume or leak request bodies, signatures, prompts, tokens, or attachment metadata.
-- [ ] Keep Node and `@slack/bolt` on supported, patched versions and include them in dependency-vulnerability monitoring.
-- [ ] Test valid signatures, invalid signatures, stale timestamps, malformed JSON, wrong methods/paths, oversized bodies, slow requests, duplicate events, retry headers, and unauthorized but validly signed workspace/user events.
+- [x] Terminate TLS at a managed load balancer or hardened reverse proxy; do not directly expose the Node receiver to the internet.
+- [x] Make the Bolt service reachable only from that trusted edge component.
+- [x] Publicly route only `POST /slack/events` and a minimal health endpoint. Return no configuration, dependency, credential, or detailed failure data from health checks.
+- [x] Enforce request-body, header, connection, and request-time limits before Bolt buffers the body. Slack event payloads contain file metadata rather than attachment binaries, so determine a small bound from representative payload tests.
+- [x] Add edge rate limiting and, for AWS, evaluate AWS WAF rules for malformed/flood traffic. Slack signatures remain the source-authentication mechanism; do not depend on source IP allowlisting as a substitute.
+- [x] Keep system time synchronized because request freshness validation depends on it.
+- [x] Store the signing secret in the existing protected bundle or cloud secret manager, exclude it from logs and OpenCode's environment, and document rotation.
+- [x] Ensure rejected signatures and malformed requests cannot cause unbounded log volume or leak request bodies, signatures, prompts, tokens, or attachment metadata.
+- [x] Keep Node and `@slack/bolt` on supported, patched versions and include them in dependency-vulnerability monitoring.
+- [x] Test valid signatures, invalid signatures, stale timestamps, malformed JSON, wrong methods/paths, oversized bodies, slow requests, duplicate events, retry headers, and unauthorized but validly signed workspace/user events.
+
+M2-D implementation is complete through the reviewed NGINX configuration, loopback-only and bounded private receiver, privacy-preserving rejection logger, dependency monitoring, automated tests, and operator runbook. Production acceptance still requires the deployment-specific TLS, firewall/reachability, NTP, external traffic, and log-search evidence in `docs/public-endpoint-hardening.md`; repository tests cannot manufacture that evidence.
 
 **Acceptance criteria**
 
@@ -366,7 +368,7 @@ M1 integration seam (complete) --> M2-A/B receiver, acknowledgement, deduplicati
 M1 + M2 ---------------------------------------------> M4 Discord
 ```
 
-M2-A through M2-C are implemented with the durable-inbox acknowledgement guarantee recorded below. M2-D remains open because it requires deployment-edge controls and evidence in addition to application tests.
+M2-A through M2-D are implemented with the durable-inbox acknowledgement guarantee and reviewed endpoint-hardening configuration recorded below. Each production deployment must archive its edge evidence before it can claim the M2-D acceptance criteria.
 
 If work is split across contributors, each contributor should claim one work package and avoid overlapping primary files. Each package must return:
 

@@ -2,7 +2,9 @@
 param(
     [string]$GatewayDataDirectory = "$env:ProgramData\AgentRunner",
     [string]$WorkerDataDirectory = "$env:ProgramData\OpenCodeWorker",
-    [string]$ConfigPath = "$env:ProgramData\AgentRunner\config.json"
+    [string]$ConfigPath = "$env:ProgramData\AgentRunner\config.json",
+    [string]$EdgeConfigPath = "",
+    [string]$NginxPath = "nginx"
 )
 
 $ErrorActionPreference = "Stop"
@@ -83,6 +85,7 @@ if (Test-Path $ConfigPath) {
         $gatewayNames = Read-SecretNames $gatewaySecretPath
         if ($slackIngress -eq "events-api") {
             Assert-Control ($gatewayNames -contains "SLACK_SIGNING_SECRET") "Events API gateway bundle contains the Slack signing secret"
+            Assert-Control ($gatewayNames -notcontains "SLACK_APP_TOKEN") "Events API gateway bundle excludes the Slack app token"
         }
         else {
             Assert-Control ($gatewayNames -contains "SLACK_APP_TOKEN") "Socket Mode gateway bundle contains the Slack app token"
@@ -109,6 +112,56 @@ if (Test-Path $ConfigPath) {
     Assert-Control (Test-IsWithin (Resolve-ConfiguredPath $config.storage.databasePath $resolvedConfigPath) $GatewayDataDirectory) "SQLite storage is inside the gateway data directory"
     Assert-Control (Test-IsWithin (Resolve-ConfiguredPath $config.storage.auditLogPath $resolvedConfigPath) $GatewayDataDirectory) "JSONL audit storage is inside the gateway data directory"
     Assert-Control (Test-IsWithin (Resolve-ConfiguredPath $config.storage.worktreeRoot $resolvedConfigPath) $WorkerDataDirectory) "worktree storage is inside the worker data directory"
+
+    if ($slackIngress -eq "events-api") {
+        $http = $config.slack.http
+        Assert-Control ($http.host -eq "127.0.0.1") "Events API listener uses the reviewed loopback IPv4 address"
+        Assert-Control ([int]$http.maxBodyBytes -gt 0 -and [int]$http.maxBodyBytes -le 262144) "private request-body limit is at most 256 KiB"
+        Assert-Control ([int]$http.maxHeaderBytes -gt 0 -and [int]$http.maxHeaderBytes -le 16384) "private request-header limit is at most 16 KiB"
+        Assert-Control ([int]$http.requestTimeoutMs -gt 0 -and [int]$http.requestTimeoutMs -le 5000) "private request timeout is at most five seconds"
+        Assert-Control ([int]$http.headersTimeoutMs -gt 0 -and [int]$http.headersTimeoutMs -le 5000) "private header timeout is at most five seconds"
+        Assert-Control ([int]$http.headersTimeoutMs -le [int]$http.requestTimeoutMs) "private header timeout does not exceed the request timeout"
+        Assert-Control ([int]$http.maxConnections -gt 0 -and [int]$http.maxConnections -le 100) "private listener accepts at most 100 connections"
+
+        $listeners = @(Get-NetTCPConnection -LocalPort ([int]$http.port) -State Listen -ErrorAction SilentlyContinue)
+        Assert-Control (@($listeners | Where-Object { $_.LocalAddress -eq "127.0.0.1" }).Count -gt 0) "Events API private listener is running on the configured IPv4 loopback"
+        Assert-Control (
+            $listeners.Count -gt 0 -and
+            @($listeners | Where-Object { $_.LocalAddress -notin @("127.0.0.1", "::1") }).Count -eq 0
+        ) "Events API port has no non-loopback listener"
+
+        $hasEdgeConfigPath = -not [string]::IsNullOrWhiteSpace($EdgeConfigPath)
+        Assert-Control $hasEdgeConfigPath "installed NGINX configuration path is supplied explicitly"
+        $edgeConfigExists = $false
+        if ($hasEdgeConfigPath) {
+            $resolvedEdgeConfigPath = [IO.Path]::GetFullPath($EdgeConfigPath)
+            $edgeConfigExists = Test-Path -LiteralPath $resolvedEdgeConfigPath -PathType Leaf
+        }
+        Assert-Control $edgeConfigExists "installed NGINX configuration exists"
+
+        $nginxCommand = Get-Command $NginxPath -ErrorAction SilentlyContinue
+        Assert-Control ($null -ne $nginxCommand) "NGINX executable is available for effective-configuration validation"
+        if ($edgeConfigExists -and $nginxCommand) {
+            $edgeOutput = @(& $nginxCommand.Source -T -c $resolvedEdgeConfigPath 2>&1)
+            $nginxConfigIsValid = $LASTEXITCODE -eq 0
+            Assert-Control $nginxConfigIsValid "installed NGINX configuration passes nginx -T"
+            $edge = $edgeOutput -join [Environment]::NewLine
+            $eventsPathPattern = [regex]::Escape([string]$http.eventsPath)
+            $healthPathPattern = [regex]::Escape([string]$http.healthPath)
+            Assert-Control ($edge -match '(?m)^\s*listen\s+443\s+ssl;') "edge terminates public TLS"
+            Assert-Control ($edge -match "(?m)^\s*location\s+=\s+$eventsPathPattern\s+\{") "edge exposes the configured exact Slack event route"
+            Assert-Control ($edge -match "(?m)^\s*location\s+=\s+$healthPathPattern\s+\{") "edge exposes the configured exact health route"
+            Assert-Control ($edge -match '(?m)^\s*client_max_body_size\s+256k;') "edge limits request bodies before Bolt"
+            Assert-Control ($edge -match '(?m)^\s*proxy_request_buffering\s+on;') "edge buffers requests before Bolt"
+            Assert-Control ($edge -match '(?m)^\s*limit_req\s+zone=global_requests') "edge applies global rate limiting"
+            Assert-Control ($edge -match '(?m)^\s*access_log\s+off;') "edge request logging is disabled against log floods"
+            $expectedUpstream = "(?m)^\s*server\s+127\.0\.0\.1:$([int]$http.port);"
+            Assert-Control ($edge -match $expectedUpstream) "edge upstream is the configured loopback Bolt listener"
+        }
+
+        $timeService = Get-Service W32Time -ErrorAction SilentlyContinue
+        Assert-Control ($timeService -and $timeService.Status -eq "Running") "Windows Time is running for Slack replay protection"
+    }
 }
 else {
     Assert-Control $false "configuration file exists"
