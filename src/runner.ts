@@ -5,6 +5,7 @@ import type { RunnerDatabase } from "./database.js";
 import { AuthorizationError, LimitError, RunnerError, TimeoutError } from "./errors.js";
 import type {
   Attachment,
+  AuthorizationPolicy,
   Executor,
   JobRecord,
   JobReporter,
@@ -73,8 +74,6 @@ export class ConsoleReporter implements JobReporter {
 }
 
 export class AgentRunner {
-  private readonly allowedUsers: Set<string>;
-  private readonly allowedWorkspaces: Set<string>;
   private readonly active = new Set<Promise<void>>();
   private timer?: NodeJS.Timeout;
   private maintenanceTimer?: NodeJS.Timeout;
@@ -82,18 +81,17 @@ export class AgentRunner {
 
   constructor(
     private readonly config: RunnerConfig,
+    private readonly authorization: AuthorizationPolicy,
     private readonly database: RunnerDatabase,
     private readonly executor: Executor,
     private readonly audit: AuditLogger,
     private readonly reporterFactory: ReporterFactory = () => new ConsoleReporter(),
-  ) {
-    this.allowedUsers = new Set(config.slack.allowedUserIds);
-    this.allowedWorkspaces = new Set(config.slack.allowedWorkspaceIds);
-  }
+  ) {}
 
   async submit(submission: JobSubmission): Promise<SubmissionResult> {
-    if (!this.allowedWorkspaces.has(submission.tenantId) || !this.allowedUsers.has(submission.actorId)) {
-      const rejection = new AuthorizationError();
+    const decision = this.authorization.authorize(submission);
+    if (!decision.authorized) {
+      const rejection = new AuthorizationError(decision.reason);
       await this.audit.log(
         "job_rejected",
         { reason: rejection.code, integration: submission.integration, tenantId: submission.tenantId, conversationId: submission.conversationId },
@@ -182,10 +180,10 @@ export class AgentRunner {
   }
 
   private rejectionFor(submission: JobSubmission): RunnerError | undefined {
-    if (this.database.countJobs(submission.actorId, "queued") >= this.config.limits.maxQueuedJobsPerUser) {
+    if (this.database.countJobs(submission.integration, submission.tenantId, submission.actorId, "queued") >= this.config.limits.maxQueuedJobsPerUser) {
       return new LimitError("Your queue is full. Wait for an existing job to finish.", "QUEUE_LIMIT");
     }
-    if (this.database.dailyUsage(submission.actorId).cost >= this.config.limits.dailyCostCap) {
+    if (this.database.dailyUsage(submission.integration, submission.tenantId, submission.actorId).cost >= this.config.limits.dailyCostCap) {
       return new LimitError("Your daily agent budget has been reached.", "DAILY_BUDGET");
     }
     return undefined;
@@ -221,7 +219,7 @@ export class AgentRunner {
     let succeeded = false;
     let failureForUser = "";
     let toolEventCount = 0;
-    const costBeforeJob = this.database.dailyUsage(job.actorId).cost;
+    const costBeforeJob = this.database.dailyUsage(job.integration, job.tenantId, job.actorId).cost;
 
     try {
       const session = this.database.getSession(job.sessionKey);

@@ -127,11 +127,13 @@ export class RunnerDatabase {
 
       CREATE TABLE IF NOT EXISTS daily_usage (
         usage_date TEXT NOT NULL,
+        integration TEXT NOT NULL DEFAULT 'slack',
+        tenant_id TEXT NOT NULL DEFAULT '',
         user_id TEXT NOT NULL,
         cost REAL NOT NULL DEFAULT 0,
         input_tokens INTEGER NOT NULL DEFAULT 0,
         output_tokens INTEGER NOT NULL DEFAULT 0,
-        PRIMARY KEY (usage_date, user_id)
+        PRIMARY KEY (usage_date, integration, tenant_id, user_id)
       );
 
       CREATE TABLE IF NOT EXISTS audit_events (
@@ -184,6 +186,30 @@ export class RunnerDatabase {
       });
     }
     this.sqlite.exec("CREATE INDEX IF NOT EXISTS jobs_actor_status_idx ON jobs(actor_id, status)");
+
+    // Existing daily_usage rows predate integration-aware budget tracking.
+    // Recreate the table with integration and tenant columns, backfilling all
+    // legacy rows as Slack records (the only integration that existed before).
+    const dailyUsageColumns = this.sqlite.prepare("PRAGMA table_info(daily_usage)").all() as Row[];
+    if (!dailyUsageColumns.some((col) => String(col.name) === "integration")) {
+      this.sqlite.exec(`
+        CREATE TABLE IF NOT EXISTS daily_usage_new (
+          usage_date TEXT NOT NULL,
+          integration TEXT NOT NULL DEFAULT 'slack',
+          tenant_id TEXT NOT NULL DEFAULT '',
+          user_id TEXT NOT NULL,
+          cost REAL NOT NULL DEFAULT 0,
+          input_tokens INTEGER NOT NULL DEFAULT 0,
+          output_tokens INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (usage_date, integration, tenant_id, user_id)
+        );
+        INSERT INTO daily_usage_new (usage_date, integration, tenant_id, user_id, cost, input_tokens, output_tokens)
+          SELECT usage_date, 'slack', '', user_id, cost, input_tokens, output_tokens FROM daily_usage;
+        DROP TABLE daily_usage;
+        ALTER TABLE daily_usage_new RENAME TO daily_usage;
+      `);
+    }
+    this.sqlite.exec("CREATE INDEX IF NOT EXISTS jobs_integration_tenant_actor_status_idx ON jobs(integration, tenant_id, actor_id, status)");
   }
 
   close(): void {
@@ -285,8 +311,8 @@ export class RunnerDatabase {
     return row ? mapJob(row) : undefined;
   }
 
-  countJobs(actorId: string, status: JobStatus): number {
-    const row = this.sqlite.prepare("SELECT COUNT(*) AS count FROM jobs WHERE actor_id = ? AND status = ?").get(actorId, status) as Row;
+  countJobs(integration: IntegrationId, tenantId: string, actorId: string, status: JobStatus): number {
+    const row = this.sqlite.prepare("SELECT COUNT(*) AS count FROM jobs WHERE integration = ? AND tenant_id = ? AND actor_id = ? AND status = ?").get(integration, tenantId, actorId, status) as Row;
     return Number(row.count);
   }
 
@@ -301,7 +327,7 @@ export class RunnerDatabase {
       const row = this.sqlite.prepare(`
         SELECT j.* FROM jobs j
         WHERE j.status = 'queued'
-          AND (SELECT COUNT(*) FROM jobs r WHERE r.status = 'running' AND r.user_id = j.user_id) < ?
+          AND (SELECT COUNT(*) FROM jobs r WHERE r.status = 'running' AND r.integration = j.integration AND r.tenant_id = j.tenant_id AND r.actor_id = j.actor_id) < ?
           AND NOT EXISTS (
             SELECT 1 FROM jobs r WHERE r.status = 'running' AND r.session_key = j.session_key
           )
@@ -345,13 +371,13 @@ export class RunnerDatabase {
       if (usage.cost || usage.inputTokens || usage.outputTokens) {
         const job = this.getJob(id)!;
         this.sqlite.prepare(`
-          INSERT INTO daily_usage(usage_date, user_id, cost, input_tokens, output_tokens)
-          VALUES (?, ?, ?, ?, ?)
-          ON CONFLICT(usage_date, user_id) DO UPDATE SET
+          INSERT INTO daily_usage(usage_date, integration, tenant_id, user_id, cost, input_tokens, output_tokens)
+          VALUES (?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(usage_date, integration, tenant_id, user_id) DO UPDATE SET
             cost = cost + excluded.cost,
             input_tokens = input_tokens + excluded.input_tokens,
             output_tokens = output_tokens + excluded.output_tokens
-        `).run(this.usageDate(), job.actorId, usage.cost, usage.inputTokens, usage.outputTokens);
+        `).run(this.usageDate(), job.integration, job.tenantId, job.actorId, usage.cost, usage.inputTokens, usage.outputTokens);
       }
     });
   }
@@ -377,10 +403,10 @@ export class RunnerDatabase {
     `).run(sessionKey);
   }
 
-  dailyUsage(userId: string): Usage {
+  dailyUsage(integration: IntegrationId, tenantId: string, actorId: string): Usage {
     const row = this.sqlite.prepare(`
-      SELECT cost, input_tokens, output_tokens FROM daily_usage WHERE usage_date = ? AND user_id = ?
-    `).get(this.usageDate(), userId) as Row | undefined;
+      SELECT cost, input_tokens, output_tokens FROM daily_usage WHERE usage_date = ? AND integration = ? AND tenant_id = ? AND user_id = ?
+    `).get(this.usageDate(), integration, tenantId, actorId) as Row | undefined;
     return row
       ? { cost: Number(row.cost), inputTokens: Number(row.input_tokens), outputTokens: Number(row.output_tokens) }
       : { cost: 0, inputTokens: 0, outputTokens: 0 };

@@ -9,7 +9,7 @@ import { RunnerDatabase } from "../src/database.js";
 import { AgentRunner } from "../src/runner.js";
 import { unprivilegedChildEnvironment } from "../src/environment.js";
 import type { Executor, JobReporter } from "../src/types.js";
-import { testConfig, waitFor } from "./helpers.js";
+import { testAuthorizationPolicy, testConfig, waitFor } from "./helpers.js";
 
 test("configuration rejects a non-loopback OpenCode endpoint", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-config-"));
@@ -56,7 +56,7 @@ test("Slack delivery failure cannot change a successful execution result", async
       workingDirectory: root,
     }),
   };
-  const runner = new AgentRunner(config, database, executor, audit, () => reporter);
+  const runner = new AgentRunner(config, testAuthorizationPolicy(config), database, executor, audit, () => reporter);
   await runner.start();
   const { job } = await runner.submit({
     integration: "slack",
@@ -93,7 +93,7 @@ test("runner enforces the configured output bound", async () => {
       throw new Error("output callback should reject");
     },
   };
-  const runner = new AgentRunner(config, database, executor, audit, () => reporter);
+  const runner = new AgentRunner(config, testAuthorizationPolicy(config), database, executor, audit, () => reporter);
   await runner.start();
   const { job } = await runner.submit({
     integration: "slack",

@@ -132,11 +132,11 @@ This milestone should preserve user-visible behavior. Complete its contracts bef
 
 **Primary files:** `src/runner.ts`, `src/config.ts`, runner/config tests.
 
-- [ ] Define an integration-aware authorization policy at the submission boundary.
-- [ ] Keep defense in depth: the platform adapter may reject early, but the orchestration submission boundary must still enforce the configured policy.
-- [ ] Stop `AgentRunner` from reading `config.slack.allowedWorkspaceIds` and `allowedUserIds` directly.
-- [ ] Apply queue, daily budget, and concurrency limits against normalized actor identity. Include integration/tenant in keys where cross-platform collisions would be incorrect.
-- [ ] Reshape configuration without silently weakening current Slack allowlist validation.
+- [x] Define an integration-aware authorization policy at the submission boundary.
+- [x] Keep defense in depth: the platform adapter may reject early, but the orchestration submission boundary must still enforce the configured policy.
+- [x] Stop `AgentRunner` from reading `config.slack.allowedWorkspaceIds` and `allowedUserIds` directly.
+- [x] Apply queue, daily budget, and concurrency limits against normalized actor identity. Include integration/tenant in keys where cross-platform collisions would be incorrect.
+- [x] Reshape configuration without silently weakening current Slack allowlist validation.
 
 **Acceptance criteria**
 

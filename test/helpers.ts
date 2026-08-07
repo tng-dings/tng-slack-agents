@@ -1,7 +1,10 @@
-import type { RunnerConfig } from "../src/config.js";
+import { IntegrationAuthorizationPolicy, type RunnerConfig } from "../src/config.js";
 
 export function testConfig(root: string): RunnerConfig {
   return {
+    integrations: {
+      slack: { allowedTenants: ["T1"], allowedActors: ["U_ALLOWED"] },
+    },
     slack: {
       enabled: false,
       allowedWorkspaceIds: ["T1"],
@@ -44,4 +47,8 @@ export async function waitFor(check: () => boolean, timeoutMs = 2_000): Promise<
     if (Date.now() >= deadline) throw new Error("Timed out waiting for condition");
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
+}
+
+export function testAuthorizationPolicy(config: RunnerConfig): IntegrationAuthorizationPolicy {
+  return new IntegrationAuthorizationPolicy(config.integrations);
 }

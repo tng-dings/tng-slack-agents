@@ -1,5 +1,5 @@
 import { AuditLogger } from "./audit.js";
-import { loadConfig, loadSecrets } from "./config.js";
+import { IntegrationAuthorizationPolicy, loadConfig, loadSecrets } from "./config.js";
 import { RunnerDatabase } from "./database.js";
 import { OpenCodeExecutor } from "./opencode.js";
 import { AgentRunner } from "./runner.js";
@@ -23,8 +23,9 @@ async function main(): Promise<void> {
     audit,
     config.limits.maxOutputCharacters + 64_000,
   );
+  const authorization = new IntegrationAuthorizationPolicy(config.integrations);
   const slack = config.slack.enabled ? new SlackGateway(config, secrets) : undefined;
-  const runner = new AgentRunner(config, database, executor, audit, (job) => slack?.reporter(job) ?? {
+  const runner = new AgentRunner(config, authorization, database, executor, audit, (job) => slack?.reporter(job) ?? {
     start: async () => undefined,
     append: async (delta) => process.stdout.write(delta),
     succeed: async () => process.stdout.write("\n"),

@@ -1,7 +1,14 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import type { AuthorizationDecision, AuthorizationPolicy, IntegrationId, JobSubmission } from "./types.js";
+
+export interface IntegrationAuthorization {
+  allowedTenants: string[];
+  allowedActors: string[];
+}
 
 export interface RunnerConfig {
+  integrations: Partial<Record<IntegrationId, IntegrationAuthorization>>;
   slack: {
     enabled: boolean;
     allowedWorkspaceIds: string[];
@@ -138,6 +145,9 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
   }
 
   return {
+    integrations: {
+      slack: { allowedTenants: allowedWorkspaceIds, allowedActors: allowedUserIds },
+    },
     slack: {
       enabled,
       allowedWorkspaceIds,
@@ -190,4 +200,26 @@ export function loadSecrets(config: RunnerConfig): RunnerSecrets {
     ...(slackBotToken ? { slackBotToken } : {}),
     ...(slackAppToken ? { slackAppToken } : {}),
   };
+}
+
+export class IntegrationAuthorizationPolicy implements AuthorizationPolicy {
+  private readonly rules: ReadonlyMap<IntegrationId, IntegrationAuthorization>;
+
+  constructor(rules: Partial<Record<IntegrationId, IntegrationAuthorization>>) {
+    this.rules = new Map(Object.entries(rules) as [IntegrationId, IntegrationAuthorization][]);
+  }
+
+  authorize(submission: JobSubmission): AuthorizationDecision {
+    const rule = this.rules.get(submission.integration);
+    if (!rule) {
+      return { authorized: false, reason: `No authorization policy for integration "${submission.integration}"` };
+    }
+    if (!rule.allowedTenants.includes(submission.tenantId)) {
+      return { authorized: false };
+    }
+    if (!rule.allowedActors.includes(submission.actorId)) {
+      return { authorized: false };
+    }
+    return { authorized: true };
+  }
 }

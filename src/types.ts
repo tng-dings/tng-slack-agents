@@ -104,3 +104,12 @@ export interface SubmissionResult {
 }
 
 export type ReporterFactory = (job: JobRecord) => JobReporter;
+
+export interface AuthorizationDecision {
+  readonly authorized: boolean;
+  readonly reason?: string;
+}
+
+export interface AuthorizationPolicy {
+  authorize(submission: JobSubmission): AuthorizationDecision;
+}
