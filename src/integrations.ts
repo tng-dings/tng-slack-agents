@@ -1,13 +1,14 @@
+import { RunnerError } from "./errors.js";
 import type { IntegrationId, JobRecord, JobReporter, ReporterFactory } from "./types.js";
 
 export type IntegrationReporterFactories = Partial<Record<IntegrationId, ReporterFactory>>;
 
-export class MissingIntegrationReporterError extends Error {
-  readonly code = "DELIVERY_ADAPTER_MISSING";
-
+export class MissingIntegrationReporterError extends RunnerError {
   constructor(readonly integration: string) {
-    super("No delivery adapter is registered for integration " + JSON.stringify(integration));
-    this.name = "MissingIntegrationReporterError";
+    super(
+      "No delivery adapter is registered for integration " + JSON.stringify(integration),
+      "DELIVERY_ADAPTER_MISSING",
+    );
   }
 }
 

@@ -158,3 +158,101 @@ test("missing persisted integration delivery is audited without failing executio
   database.close();
   await rm(root, { recursive: true, force: true });
 });
+
+test("queued delivery setup finishes before streaming and terminal delivery recovery", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-routing-streaming-"));
+  const config = testConfig(root);
+  const database = new RunnerDatabase(config.storage.databasePath);
+  const audit = new AuditLogger(config.storage.auditLogPath, database);
+  const calls: string[] = [];
+  let factoryCalls = 0;
+  let executionStarted = false;
+  let queuedStartCalled = false;
+  let releaseQueuedStart!: () => void;
+  let runningReplyTs: string | null | undefined;
+  const queuedStartGate = new Promise<void>((resolve) => {
+    releaseQueuedStart = resolve;
+  });
+  const registry = new IntegrationReporterRegistry({
+    slack: (persistedJob) => {
+      factoryCalls += 1;
+      if (persistedJob.status === "queued") {
+        return {
+          start: async () => {
+            calls.push("queued:start");
+            queuedStartCalled = true;
+            await queuedStartGate;
+            return { replyTs: "reply-1" };
+          },
+          append: async () => undefined,
+          succeed: async () => undefined,
+          fail: async () => undefined,
+        };
+      }
+      if (persistedJob.status === "running") {
+        runningReplyTs = persistedJob.replyTs;
+        return {
+          start: async () => undefined,
+          append: async () => { throw new Error("stream unavailable"); },
+          succeed: async () => { calls.push("stale:succeed"); },
+          fail: async () => undefined,
+        };
+      }
+      return {
+        start: async () => undefined,
+        append: async () => undefined,
+        succeed: async (output) => { calls.push(`terminal:succeed:${output}`); },
+        fail: async () => undefined,
+      };
+    },
+  });
+  const executor: Executor = {
+    execute: async (_job, _session, callbacks) => {
+      executionStarted = true;
+      await callbacks.onText("completed");
+      return {
+        output: "completed",
+        usage: { cost: 0, inputTokens: 1, outputTokens: 1 },
+        openCodeSessionId: "session",
+        workingDirectory: root,
+      };
+    },
+  };
+  const runner = new AgentRunner(
+    config,
+    testAuthorizationPolicy(config),
+    database,
+    executor,
+    audit,
+    (persistedJob) => registry.reporter(persistedJob),
+  );
+
+  await runner.start();
+  const submitted = runner.submit({
+    integration: "slack",
+    sourceEventId: "streaming-reporter-failure",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "1.0",
+    actorId: "U_ALLOWED",
+    prompt: "work",
+  });
+  await waitFor(() =>
+    queuedStartCalled &&
+    database.getJobBySourceEvent("slack", "streaming-reporter-failure")?.status === "running"
+  );
+  assert.equal(factoryCalls, 1);
+  assert.equal(executionStarted, false);
+
+  releaseQueuedStart();
+  const { job: persisted } = await submitted;
+  await waitFor(() => database.getJob(persisted.id)?.status === "succeeded" && calls.includes("terminal:succeed:completed"));
+
+  assert.equal(database.getJob(persisted.id)?.status, "succeeded");
+  assert.deepEqual(calls, ["queued:start", "terminal:succeed:completed"]);
+  assert.equal(runningReplyTs, "reply-1");
+  assert.equal(factoryCalls, 3);
+  await runner.stop();
+  database.close();
+  await rm(root, { recursive: true, force: true });
+});

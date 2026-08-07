@@ -54,9 +54,6 @@ function userFacingFailure(reason: unknown, jobId: string): string {
 
 function errorMetadata(reason: unknown): { errorType: string; errorCode?: string } {
   if (reason instanceof RunnerError) return { errorType: reason.name, errorCode: reason.code };
-  if (reason instanceof Error && "code" in reason && typeof reason.code === "string") {
-    return { errorType: reason.name || "Error", errorCode: reason.code };
-  }
   if (reason instanceof Error) return { errorType: reason.name || "Error" };
   return { errorType: typeof reason };
 }
@@ -78,6 +75,7 @@ export class ConsoleReporter implements JobReporter {
 
 export class AgentRunner {
   private readonly active = new Set<Promise<void>>();
+  private readonly pendingDeliverySetup = new Map<string, Promise<void>>();
   private timer?: NodeJS.Timeout;
   private maintenanceTimer?: NodeJS.Timeout;
   private stopping = false;
@@ -139,19 +137,29 @@ export class AgentRunner {
       if (concurrent) return { job: concurrent, isNew: false };
       throw error;
     }
-    await this.audit.log(
-      "job_queued",
-      { prompt: contentMetadata(prompt), attachments: attachmentMetadata(attachments), integration: job.integration, tenantId: job.tenantId, conversationId: job.conversationId, threadId: job.threadId },
-      this.context(job),
-    );
-    const reporter = await this.resolveReporter(job, "queued");
-    if (reporter) {
-      try {
-        const started = await reporter.start();
-        if (started?.replyTs) this.database.updateJobReplyTs(job.id, started.replyTs);
-      } catch (error) {
-        await this.auditDeliveryFailure(job, "queued", error);
+    let finishDeliverySetup!: () => void;
+    const deliverySetup = new Promise<void>((resolve) => {
+      finishDeliverySetup = resolve;
+    });
+    this.pendingDeliverySetup.set(job.id, deliverySetup);
+    try {
+      await this.audit.log(
+        "job_queued",
+        { prompt: contentMetadata(prompt), attachments: attachmentMetadata(attachments), integration: job.integration, tenantId: job.tenantId, conversationId: job.conversationId, threadId: job.threadId },
+        this.context(job),
+      );
+      const reporter = await this.resolveReporter(job, "queued");
+      if (reporter) {
+        try {
+          const started = await reporter.start();
+          if (started?.replyTs) this.database.updateJobReplyTs(job.id, started.replyTs);
+        } catch (error) {
+          await this.auditDeliveryFailure(job, "queued", error);
+        }
       }
+    } finally {
+      finishDeliverySetup();
+      this.pendingDeliverySetup.delete(job.id);
     }
     queueMicrotask(() => this.pump());
     return { job: this.database.getJob(job.id)!, isNew: true };
@@ -215,7 +223,10 @@ export class AgentRunner {
   }
 
   private async process(job: JobRecord): Promise<void> {
+    await this.pendingDeliverySetup.get(job.id);
+    job = this.database.getJob(job.id) ?? job;
     let reporter = await this.resolveReporter(job, "running");
+    let retryTerminalDelivery = false;
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(new TimeoutError(`Job exceeded ${this.config.limits.jobTimeoutSeconds} seconds`)),
@@ -252,6 +263,7 @@ export class AgentRunner {
               } catch (error) {
                 await this.auditDeliveryFailure(job, "streaming", error);
                 reporter = undefined;
+                retryTerminalDelivery = true;
               }
             }
             if (accepted.length !== delta.length) {
@@ -314,13 +326,22 @@ export class AgentRunner {
       clearTimeout(timeout);
     }
 
+    if (!reporter && retryTerminalDelivery) {
+      // A fresh adapter can still replace a stale Working message even when
+      // its streaming instance failed. Re-read the job so the adapter sees
+      // delivery context (such as a reply timestamp) persisted after submit.
+      reporter = await this.resolveReporter(
+        this.database.getJob(job.id) ?? job,
+        succeeded ? "succeeded" : "failed",
+      );
+    }
+
     if (reporter) {
       try {
         if (succeeded) await reporter.succeed(output);
         else await reporter.fail(failureForUser);
       } catch (error) {
-        await this.auditDeliveryFailure(job, succeeded ? "succeeded" : "failed", error)
-          .catch((auditError: unknown) => console.error("Unable to record delivery failure", auditError));
+        await this.auditDeliveryFailure(job, succeeded ? "succeeded" : "failed", error);
       }
     }
   }
@@ -334,8 +355,8 @@ export class AgentRunner {
     }
   }
 
-  private auditDeliveryFailure(job: JobRecord, phase: string, error: unknown): Promise<void> {
-    return this.audit.log(
+  private async auditDeliveryFailure(job: JobRecord, phase: string, error: unknown): Promise<void> {
+    await this.audit.log(
       "delivery_failed",
       {
         phase,
@@ -344,7 +365,7 @@ export class AgentRunner {
         ...errorMetadata(error),
       },
       this.context(job),
-    );
+    ).catch((auditError: unknown) => console.error("Unable to record delivery failure", errorMetadata(auditError)));
   }
 
   private context(job: JobRecord): { jobId: string; userId: string; sessionKey: string } {
