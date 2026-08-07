@@ -54,6 +54,9 @@ function userFacingFailure(reason: unknown, jobId: string): string {
 
 function errorMetadata(reason: unknown): { errorType: string; errorCode?: string } {
   if (reason instanceof RunnerError) return { errorType: reason.name, errorCode: reason.code };
+  if (reason instanceof Error && "code" in reason && typeof reason.code === "string") {
+    return { errorType: reason.name || "Error", errorCode: reason.code };
+  }
   if (reason instanceof Error) return { errorType: reason.name || "Error" };
   return { errorType: typeof reason };
 }
@@ -85,7 +88,7 @@ export class AgentRunner {
     private readonly database: RunnerDatabase,
     private readonly executor: Executor,
     private readonly audit: AuditLogger,
-    private readonly reporterFactory: ReporterFactory = () => new ConsoleReporter(),
+    private readonly reporterFactory: ReporterFactory,
   ) {}
 
   async submit(submission: JobSubmission): Promise<SubmissionResult> {
@@ -141,15 +144,14 @@ export class AgentRunner {
       { prompt: contentMetadata(prompt), attachments: attachmentMetadata(attachments), integration: job.integration, tenantId: job.tenantId, conversationId: job.conversationId, threadId: job.threadId },
       this.context(job),
     );
-    try {
-      const started = await this.reporterFactory(job).start();
-      if (started?.replyTs) this.database.updateJobReplyTs(job.id, started.replyTs);
-    } catch (error) {
-      await this.audit.log(
-        "delivery_failed",
-        { phase: "queued", error: error instanceof Error ? error.message : String(error) },
-        this.context(job),
-      );
+    const reporter = await this.resolveReporter(job, "queued");
+    if (reporter) {
+      try {
+        const started = await reporter.start();
+        if (started?.replyTs) this.database.updateJobReplyTs(job.id, started.replyTs);
+      } catch (error) {
+        await this.auditDeliveryFailure(job, "queued", error);
+      }
     }
     queueMicrotask(() => this.pump());
     return { job: this.database.getJob(job.id)!, isNew: true };
@@ -160,7 +162,12 @@ export class AgentRunner {
     const interrupted = this.database.recoverInterruptedJobs(this.config.storage.retainJobContent);
     for (const job of interrupted) {
       await this.audit.log("job_interrupted", { reason: "runner_restart" }, this.context(job));
-      await this.reporterFactory(job).fail("This job was interrupted by an agent-runner restart. Please send the request again.").catch(() => undefined);
+      const reporter = await this.resolveReporter(job, "interrupted");
+      if (reporter) {
+        await reporter
+          .fail("This job was interrupted by an agent-runner restart. Please send the request again.")
+          .catch((error: unknown) => this.auditDeliveryFailure(job, "interrupted", error));
+      }
     }
     this.timer = setInterval(() => this.pump(), this.config.queue.pollIntervalMs);
     this.timer.unref();
@@ -208,7 +215,7 @@ export class AgentRunner {
   }
 
   private async process(job: JobRecord): Promise<void> {
-    const reporter = this.reporterFactory(job);
+    let reporter = await this.resolveReporter(job, "running");
     const controller = new AbortController();
     const timeout = setTimeout(
       () => controller.abort(new TimeoutError(`Job exceeded ${this.config.limits.jobTimeoutSeconds} seconds`)),
@@ -239,7 +246,14 @@ export class AgentRunner {
             const accepted = delta.slice(0, remaining);
             output += accepted;
             this.database.appendOutput(job.id, output);
-            await reporter.append(accepted);
+            if (reporter) {
+              try {
+                await reporter.append(accepted);
+              } catch (error) {
+                await this.auditDeliveryFailure(job, "streaming", error);
+                reporter = undefined;
+              }
+            }
             if (accepted.length !== delta.length) {
               const limitError = new LimitError("The agent output exceeded the configured limit.", "OUTPUT_LIMIT");
               controller.abort(limitError);
@@ -300,16 +314,37 @@ export class AgentRunner {
       clearTimeout(timeout);
     }
 
-    try {
-      if (succeeded) await reporter.succeed(output);
-      else await reporter.fail(failureForUser);
-    } catch (error) {
-      await this.audit.log(
-        "delivery_failed",
-        { phase: succeeded ? "succeeded" : "failed", ...errorMetadata(error) },
-        this.context(job),
-      ).catch((auditError: unknown) => console.error("Unable to record delivery failure", auditError));
+    if (reporter) {
+      try {
+        if (succeeded) await reporter.succeed(output);
+        else await reporter.fail(failureForUser);
+      } catch (error) {
+        await this.auditDeliveryFailure(job, succeeded ? "succeeded" : "failed", error)
+          .catch((auditError: unknown) => console.error("Unable to record delivery failure", auditError));
+      }
     }
+  }
+
+  private async resolveReporter(job: JobRecord, phase: string): Promise<JobReporter | undefined> {
+    try {
+      return this.reporterFactory(job);
+    } catch (error) {
+      await this.auditDeliveryFailure(job, phase, error);
+      return undefined;
+    }
+  }
+
+  private auditDeliveryFailure(job: JobRecord, phase: string, error: unknown): Promise<void> {
+    return this.audit.log(
+      "delivery_failed",
+      {
+        phase,
+        integration: job.integration,
+        error: error instanceof Error ? error.message : String(error),
+        ...errorMetadata(error),
+      },
+      this.context(job),
+    );
   }
 
   private context(job: JobRecord): { jobId: string; userId: string; sessionKey: string } {

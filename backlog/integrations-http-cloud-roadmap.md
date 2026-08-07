@@ -165,10 +165,10 @@ This milestone should preserve user-visible behavior. Complete its contracts bef
 
 **Primary files:** `src/index.ts`, integration registry/composition code, reporter-routing tests.
 
-- [ ] Replace the single optional Slack reporter selection with integration-aware routing based on the persisted job.
-- [ ] Fail closed and audit a clear delivery error if no adapter exists for a persisted integration.
-- [ ] Ensure restart recovery selects the original integration's reporter.
-- [ ] Keep console reporting available for explicit local/smoke usage rather than as an accidental fallback for unknown integrations.
+- [x] Replace the single optional Slack reporter selection with integration-aware routing based on the persisted job.
+- [x] Fail closed and audit a clear delivery error if no adapter exists for a persisted integration.
+- [x] Ensure restart recovery selects the original integration's reporter.
+- [x] Keep console reporting available for explicit local/smoke usage rather than as an accidental fallback for unknown integrations.
 
 **Acceptance criteria**
 

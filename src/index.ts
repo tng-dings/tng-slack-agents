@@ -1,6 +1,7 @@
 import { AuditLogger } from "./audit.js";
 import { IntegrationAuthorizationPolicy, loadConfig, loadSecrets } from "./config.js";
 import { RunnerDatabase } from "./database.js";
+import { IntegrationReporterRegistry } from "./integrations.js";
 import { OpenCodeExecutor } from "./opencode.js";
 import { AgentRunner } from "./runner.js";
 import { SlackGateway } from "./slack.js";
@@ -25,12 +26,10 @@ async function main(): Promise<void> {
   );
   const authorization = new IntegrationAuthorizationPolicy(config.integrations);
   const slack = config.slack.enabled ? new SlackGateway(config, secrets) : undefined;
-  const runner = new AgentRunner(config, authorization, database, executor, audit, (job) => slack?.reporter(job) ?? {
-    start: async () => undefined,
-    append: async (delta) => process.stdout.write(delta),
-    succeed: async () => process.stdout.write("\n"),
-    fail: async (message) => console.error(message),
+  const reporters = new IntegrationReporterRegistry({
+    ...(slack ? { slack: (job) => slack.reporter(job) } : {}),
   });
+  const runner = new AgentRunner(config, authorization, database, executor, audit, (job) => reporters.reporter(job));
   slack?.attachRunner(runner);
 
   let shuttingDown = false;
