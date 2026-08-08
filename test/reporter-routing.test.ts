@@ -19,7 +19,7 @@ function job(integration: IntegrationId): JobRecord {
     tenantId: "tenant",
     conversationId: "conversation",
     threadId: "thread",
-    replyTs: null,
+    deliveryMessageId: null,
     actorId: "actor",
     prompt: "work",
     attachments: [],
@@ -182,7 +182,7 @@ test("queued delivery setup finishes before streaming and terminal delivery reco
             calls.push("queued:start");
             queuedStartCalled = true;
             await queuedStartGate;
-            return { replyTs: "reply-1" };
+            return { deliveryMessageId: "reply-1" };
           },
           append: async () => undefined,
           succeed: async () => undefined,
@@ -190,7 +190,7 @@ test("queued delivery setup finishes before streaming and terminal delivery reco
         };
       }
       if (persistedJob.status === "running") {
-        runningReplyTs = persistedJob.replyTs;
+        runningReplyTs = persistedJob.deliveryMessageId;
         return {
           start: async () => undefined,
           append: async () => { throw new Error("stream unavailable"); },

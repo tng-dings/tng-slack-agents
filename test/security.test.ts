@@ -73,6 +73,75 @@ test("Slack credentials are required only by the selected ingress", () => {
   }
 });
 
+test("Discord credentials match the selected ingress", () => {
+  const config = testConfig(".");
+  const previous = {
+    bot: process.env.DISCORD_BOT_TOKEN,
+    publicKey: process.env.DISCORD_PUBLIC_KEY,
+    openCode: process.env.OPENCODE_SERVER_PASSWORD,
+  };
+  try {
+    process.env.OPENCODE_SERVER_PASSWORD = "password";
+    config.discord.enabled = true;
+    process.env.DISCORD_BOT_TOKEN = "discord-bot-token";
+    assert.equal(loadSecrets(config).discordBotToken, "discord-bot-token");
+    assert.equal(loadSecrets(config).discordPublicKey, undefined);
+    config.discord.ingress = "http";
+    delete process.env.DISCORD_PUBLIC_KEY;
+    assert.throws(() => loadSecrets(config), /DISCORD_PUBLIC_KEY/);
+    process.env.DISCORD_PUBLIC_KEY = "a".repeat(64);
+    assert.equal(loadSecrets(config).discordPublicKey, "a".repeat(64));
+    config.discord.enabled = false;
+    delete process.env.DISCORD_PUBLIC_KEY;
+    assert.equal(loadSecrets(config).discordPublicKey, undefined);
+  } finally {
+    for (const [name, value] of [
+      ["DISCORD_BOT_TOKEN", previous.bot],
+      ["DISCORD_PUBLIC_KEY", previous.publicKey],
+      ["OPENCODE_SERVER_PASSWORD", previous.openCode],
+    ] as const) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
+});
+
+test("Discord configuration defaults to Gateway with a bounded legacy HTTP option", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-discord-config-"));
+  const filename = path.join(root, "config.json");
+  const config = {
+    discord: {
+      enabled: true,
+      applicationId: "APP1",
+      commandName: "agent",
+      allowedGuildIds: ["G1"],
+      allowedUserIds: ["U1"],
+      http: { host: "127.0.0.1", port: 3001, interactionsPath: "/discord/interactions" },
+    },
+    slack: { enabled: false, allowedWorkspaceIds: [], allowedUserIds: [] },
+    openCode: { baseUrl: "http://127.0.0.1:4096", workingRepository: root },
+    storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
+  };
+  await writeFile(filename, JSON.stringify(config));
+  const loaded = await loadConfig(filename);
+  assert.equal(loaded.discord.ingress, "gateway");
+  assert.equal(loaded.discord.commandName, "agent");
+  assert.equal(loaded.discord.http.host, "127.0.0.1");
+  assert.equal(loaded.discord.http.requestTimeoutMs, 2_500);
+  assert.deepEqual(loaded.integrations.discord, { allowedTenants: ["G1"], allowedActors: ["U1"] });
+
+  await writeFile(filename, JSON.stringify({ ...config, discord: { ...config.discord, commandName: "Agent" } }));
+  await assert.rejects(loadConfig(filename), /discord\.commandName/);
+  await writeFile(filename, JSON.stringify({
+    ...config,
+    discord: { ...config.discord, http: { ...config.discord.http, host: "0.0.0.0" } },
+  }));
+  await assert.rejects(loadConfig(filename), /discord\.http\.host/);
+  await writeFile(filename, JSON.stringify({ ...config, discord: { ...config.discord, ingress: "invalid" } }));
+  await assert.rejects(loadConfig(filename), /discord\.ingress/);
+  await rm(root, { recursive: true, force: true });
+});
+
 test("Events API configuration requires an app ID and explicit HTTP routes", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-http-config-"));
   const filename = path.join(root, "config.json");
@@ -194,7 +263,7 @@ test("runner enforces the configured output bound", async () => {
     actorId: "U_ALLOWED",
     prompt: "produce output",
   });
-  await waitFor(() => database.getJob(job.id)?.status === "failed");
+  await waitFor(() => database.getJob(job.id)?.status === "failed" && failure.length > 0);
   assert.equal(database.getJob(job.id)?.output, "123");
   assert.match(failure, /output exceeded/i);
   await runner.stop();
@@ -209,7 +278,8 @@ test("OpenCode launcher is wired only to the worker secret bundle", async () => 
   const gatewayService = await readFile("service/AgentRunner.xml", "utf8");
   assert.match(launcher, /worker-secrets\.bin/);
   assert.doesNotMatch(launcher, /gateway-secrets\.bin/);
-  assert.match(launcher, /Refusing to inject a Slack credential/);
+  assert.match(launcher, /Refusing to inject an integration credential/);
+  assert.match(launcher, /DISCORD_\*/);
   assert.match(launcher, /OPENCODE_CONFIG_CONTENT/);
   assert.match(launcher, /external_directory = "deny"/);
   assert.match(launcher, /webfetch = "deny"/);
@@ -241,12 +311,14 @@ test("gateway child processes receive an allowlisted environment without secrets
     PATH: "trusted-path",
     SystemRoot: "C:\\Windows",
     SLACK_BOT_TOKEN: "xoxb-secret",
+    DISCORD_BOT_TOKEN: "discord-secret",
     OPENCODE_SERVER_PASSWORD: "worker-password",
     ANTHROPIC_API_KEY: "provider-secret",
   });
   assert.equal(child.PATH, "trusted-path");
   assert.equal(child.SystemRoot, "C:\\Windows");
   assert.equal(child.SLACK_BOT_TOKEN, undefined);
+  assert.equal(child.DISCORD_BOT_TOKEN, undefined);
   assert.equal(child.OPENCODE_SERVER_PASSWORD, undefined);
   assert.equal(child.ANTHROPIC_API_KEY, undefined);
 });

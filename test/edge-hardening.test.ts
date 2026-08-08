@@ -8,7 +8,10 @@ test("NGINX edge bounds and buffers traffic before the private Bolt listener", a
 
   assert.match(configuration, /listen 443 ssl;/);
   assert.match(configuration, /upstream slack_bolt_private {\s*server 127\.0\.0\.1:3000;/);
+  assert.match(configuration, /upstream discord_interactions_private {\s*server 127\.0\.0\.1:3001;/);
+  assert.match(configuration, /upstream agent_health_private {[\s\S]*server 127\.0\.0\.1:3001 backup;/);
   assert.match(configuration, /location = \/slack\/events \{/);
+  assert.match(configuration, /location = \/discord\/interactions \{/);
   assert.match(configuration, /\$request_method != POST/);
   assert.match(configuration, /location = \/healthz \{/);
   assert.match(configuration, /\$request_method != GET/);
@@ -69,5 +72,6 @@ test("deployment evidence validates an explicitly selected effective NGINX confi
   assert.match(script, /-T -c \$resolvedEdgeConfigPath/);
   assert.match(script, /\[regex\]::Escape\(\[string\]\$http\.eventsPath\)/);
   assert.match(script, /\[regex\]::Escape\(\[string\]\$http\.healthPath\)/);
+  assert.match(script, /\[regex\]::Escape\(\[string\]\$discordHttp\.interactionsPath\)/);
   assert.match(runbook, /Test-AgentRunnerSecurity\.ps1 -EdgeConfigPath \$edgeConfigPath/);
 });

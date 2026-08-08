@@ -24,14 +24,27 @@ function contentMetadata(value: string): { characters: number; sha256: string } 
 function attachmentMetadata(attachments: Attachment[]): { count: number; totalBytes: number; items: { filename: string; mime: string; bytes: number; sha256: string }[] } {
   return {
     count: attachments.length,
-    totalBytes: attachments.reduce((sum, a) => sum + Buffer.byteLength(a.dataUrl, "utf8"), 0),
+    totalBytes: attachments.reduce((sum, a) => sum + attachmentByteLength(a), 0),
     items: attachments.map((a) => ({
       filename: a.filename,
       mime: a.mime,
-      bytes: Buffer.byteLength(a.dataUrl, "utf8"),
+      bytes: attachmentByteLength(a),
       sha256: createHash("sha256").update(a.dataUrl).digest("hex"),
     })),
   };
+}
+
+function attachmentByteLength(attachment: Attachment): number {
+  const separator = attachment.dataUrl.indexOf(",");
+  const metadata = separator >= 0 ? attachment.dataUrl.slice(0, separator) : "";
+  if (separator >= 0 && /;base64$/i.test(metadata)) {
+    const encoded = attachment.dataUrl.slice(separator + 1);
+    if (!/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) {
+      return Number.POSITIVE_INFINITY;
+    }
+    return Buffer.from(encoded, "base64").byteLength;
+  }
+  return Buffer.byteLength(attachment.dataUrl, "utf8");
 }
 
 function toolMetadata(value: unknown): Record<string, unknown> {
@@ -112,7 +125,7 @@ export class AgentRunner {
       throw new LimitError("The request exceeds the configured attachment count limit.", "ATTACHMENT_COUNT_LIMIT");
     }
     for (const attachment of attachments) {
-      if (Buffer.byteLength(attachment.dataUrl, "utf8") > this.config.limits.maxAttachmentBytes) {
+      if (attachmentByteLength(attachment) > this.config.limits.maxAttachmentBytes) {
         throw new LimitError("An attachment exceeds the configured size limit.", "ATTACHMENT_SIZE_LIMIT");
       }
     }
@@ -152,7 +165,9 @@ export class AgentRunner {
       if (reporter) {
         try {
           const started = await reporter.start();
-          if (started?.replyTs) this.database.updateJobReplyTs(job.id, started.replyTs);
+          if (started?.deliveryMessageId) {
+            this.database.updateJobDeliveryMessageId(job.id, started.deliveryMessageId);
+          }
         } catch (error) {
           await this.auditDeliveryFailure(job, "queued", error);
         }

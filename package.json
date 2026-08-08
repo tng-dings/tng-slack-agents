@@ -11,14 +11,19 @@
     "check": "tsc -p tsconfig.json --noEmit",
     "dev": "tsx watch src/index.ts",
     "doctor": "tsx src/cli/doctor.ts",
+    "discord:register": "tsx src/cli/register-discord.ts",
     "start": "node dist/src/index.js",
     "smoke": "tsx src/cli/smoke.ts",
     "security:audit": "npm audit --audit-level=high",
-    "test": "npm run build && node --test --test-isolation=none --test-concurrency=1 dist/test/edge-hardening.test.js dist/test/opencode.test.js dist/test/reporter-routing.test.js dist/test/runner.test.js dist/test/security.test.js dist/test/slack.test.js dist/test/slack-http.test.js"
+    "test": "npm run build && node --test --test-isolation=none --test-concurrency=1 dist/test/discord.test.js dist/test/discord-http.test.js dist/test/edge-hardening.test.js dist/test/opencode.test.js dist/test/reporter-routing.test.js dist/test/runner.test.js dist/test/security.test.js dist/test/slack.test.js dist/test/slack-http.test.js"
   },
   "dependencies": {
+    "@discordjs/rest": "^2.6.3",
+    "@discordjs/ws": "^2.0.4",
     "@slack/bolt": "^4.7.3",
-    "@slack/web-api": "^7.19.0"
+    "@slack/web-api": "^7.19.0",
+    "discord-api-types": "^0.38.53",
+    "discord-interactions": "^4.4.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

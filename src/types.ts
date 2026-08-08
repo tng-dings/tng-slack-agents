@@ -38,7 +38,7 @@ export interface JobRecord {
   tenantId: string;
   conversationId: string;
   threadId: string;
-  replyTs: string | null;
+  deliveryMessageId: string | null;
   actorId: string;
   prompt: string;
   attachments: Attachment[];
@@ -65,13 +65,21 @@ export interface SessionRecord {
   updatedAt: string;
 }
 
+export interface DiscordThreadRecord {
+  threadId: string;
+  guildId: string;
+  parentChannelId: string;
+  ownerUserId: string;
+  createdAt: string;
+}
+
 export interface JobSubmission {
   integration: IntegrationId;
   sourceEventId: string;
   tenantId: string;
   conversationId: string;
   threadId: string;
-  replyTs?: string;
+  deliveryMessageId?: string;
   actorId: string;
   prompt: string;
   attachments?: Attachment[];
@@ -108,7 +116,7 @@ export interface Executor {
 }
 
 export interface JobReporter {
-  start(): Promise<{ replyTs?: string } | void>;
+  start(): Promise<{ deliveryMessageId?: string } | void>;
   append(delta: string): Promise<unknown> | unknown;
   succeed(output: string): Promise<unknown> | unknown;
   fail(message: string): Promise<void>;

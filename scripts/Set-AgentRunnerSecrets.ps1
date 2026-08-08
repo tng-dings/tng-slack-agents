@@ -4,8 +4,11 @@ param(
     [string]$WorkerDataDirectory = "$env:ProgramData\OpenCodeWorker",
     [string]$GatewayServiceIdentity = "NT SERVICE\AgentRunner",
     [string]$WorkerServiceIdentity = "NT SERVICE\OpenCodeServer",
-    [ValidateSet("socket", "events-api")]
+    [ValidateSet("disabled", "socket", "events-api")]
     [string]$SlackIngress = "socket",
+    [switch]$EnableDiscord,
+    [ValidateSet("gateway", "http")]
+    [string]$DiscordIngress = "gateway",
     [Alias("AdditionalSecretNames")]
     [string[]]$WorkerSecretNames = @()
 )
@@ -92,6 +95,7 @@ foreach ($secretName in $WorkerSecretNames) {
     )
     if (
         $secretName -like 'SLACK_*' -or
+        $secretName -like 'DISCORD_*' -or
         $secretName -like 'OPENCODE_*' -or
         $secretName -like 'AGENT_RUNNER_*' -or
         $secretName -like 'GIT_*' -or
@@ -108,14 +112,22 @@ Set-RestrictedDirectoryAcl $worktreeDirectory @($GatewayServiceIdentity, $Worker
 
 $openCodePassword = Read-PlainSecret "OpenCode server password"
 $gatewaySecrets = @{
-    SLACK_BOT_TOKEN = Read-PlainSecret "Slack bot token (xoxb-...)"
     OPENCODE_SERVER_PASSWORD = $openCodePassword
 }
-if ($SlackIngress -eq "socket") {
-    $gatewaySecrets.SLACK_APP_TOKEN = Read-PlainSecret "Slack app token (xapp-...)"
+if ($SlackIngress -ne "disabled") {
+    $gatewaySecrets.SLACK_BOT_TOKEN = Read-PlainSecret "Slack bot token (xoxb-...)"
+    if ($SlackIngress -eq "socket") {
+        $gatewaySecrets.SLACK_APP_TOKEN = Read-PlainSecret "Slack app token (xapp-...)"
+    }
+    else {
+        $gatewaySecrets.SLACK_SIGNING_SECRET = Read-PlainSecret "Slack signing secret"
+    }
 }
-else {
-    $gatewaySecrets.SLACK_SIGNING_SECRET = Read-PlainSecret "Slack signing secret"
+if ($EnableDiscord) {
+    $gatewaySecrets.DISCORD_BOT_TOKEN = Read-PlainSecret "Discord bot token"
+    if ($DiscordIngress -eq "http") {
+        $gatewaySecrets.DISCORD_PUBLIC_KEY = Read-PlainSecret "Discord application public key"
+    }
 }
 $workerSecrets = @{
     OPENCODE_SERVER_PASSWORD = $openCodePassword
@@ -133,4 +145,4 @@ finally {
 }
 
 Write-Host "Gateway secrets written for $GatewayServiceIdentity."
-Write-Host "Worker secrets written for $WorkerServiceIdentity; no Slack credential is present in the worker bundle."
+Write-Host "Worker secrets written for $WorkerServiceIdentity; no Slack or Discord credential is present in the worker bundle."

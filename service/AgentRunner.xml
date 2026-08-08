@@ -1,7 +1,7 @@
 <service>
   <id>AgentRunner</id>
-  <name>Company Slack Agent Runner</name>
-  <description>Self-hosted Slack-triggered OpenCode agent runner.</description>
+  <name>Company Agent Runner</name>
+  <description>Self-hosted Slack and Discord triggered OpenCode agent runner.</description>
   <executable>%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe</executable>
   <arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BASE%\..\scripts\Start-AgentRunner.ps1"</arguments>
   <workingdirectory>%BASE%\..</workingdirectory>

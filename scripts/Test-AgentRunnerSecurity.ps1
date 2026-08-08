@@ -63,16 +63,14 @@ Assert-Control (Test-Path $workerSecretPath) "worker secret bundle exists"
 
 if (Test-Path $gatewaySecretPath) {
     $names = Read-SecretNames $gatewaySecretPath
-    Assert-Control (
-        $names -contains "SLACK_BOT_TOKEN" -and
-        ($names -contains "SLACK_APP_TOKEN" -or $names -contains "SLACK_SIGNING_SECRET")
-    ) "gateway bundle contains credentials for a Slack ingress"
+    Assert-Control ($names -contains "OPENCODE_SERVER_PASSWORD") "gateway bundle contains its OpenCode client credential"
     $aclNames = @((Get-Acl $gatewaySecretPath).Access.IdentityReference.Value)
     Assert-Control ($aclNames -notcontains "NT SERVICE\OpenCodeServer") "worker identity cannot read gateway secret bundle"
 }
 if (Test-Path $workerSecretPath) {
     $names = Read-SecretNames $workerSecretPath
     Assert-Control (-not ($names | Where-Object { $_ -like "SLACK_*" })) "worker bundle contains no Slack credential"
+    Assert-Control (-not ($names | Where-Object { $_ -like "DISCORD_*" })) "worker bundle contains no Discord credential"
     Assert-Control ($names -contains "OPENCODE_SERVER_PASSWORD") "worker bundle contains its server password"
     $aclNames = @((Get-Acl $workerSecretPath).Access.IdentityReference.Value)
     Assert-Control ($aclNames -notcontains "NT SERVICE\AgentRunner") "gateway identity cannot read worker secret bundle"
@@ -80,22 +78,40 @@ if (Test-Path $workerSecretPath) {
 
 if (Test-Path $ConfigPath) {
     $config = Get-Content -Raw $ConfigPath | ConvertFrom-Json
+    $slackEnabled = $config.slack.enabled -ne $false
+    $discordEnabled = $config.discord.enabled -eq $true
     $slackIngress = if ($config.slack.ingress) { [string]$config.slack.ingress } else { "socket" }
+    $discordIngress = if ([string]::IsNullOrWhiteSpace([string]$config.discord.ingress)) { "gateway" } else { [string]$config.discord.ingress }
     if (Test-Path $gatewaySecretPath) {
         $gatewayNames = Read-SecretNames $gatewaySecretPath
-        if ($slackIngress -eq "events-api") {
+        if ($slackEnabled -and $slackIngress -eq "events-api") {
             Assert-Control ($gatewayNames -contains "SLACK_SIGNING_SECRET") "Events API gateway bundle contains the Slack signing secret"
             Assert-Control ($gatewayNames -notcontains "SLACK_APP_TOKEN") "Events API gateway bundle excludes the Slack app token"
         }
-        else {
+        elseif ($slackEnabled) {
             Assert-Control ($gatewayNames -contains "SLACK_APP_TOKEN") "Socket Mode gateway bundle contains the Slack app token"
+        }
+        if ($discordEnabled) {
+            Assert-Control ($gatewayNames -contains "DISCORD_BOT_TOKEN") "gateway bundle contains the Discord bot token"
+            if ($discordIngress -eq "http") {
+                Assert-Control ($gatewayNames -contains "DISCORD_PUBLIC_KEY") "HTTP gateway bundle contains the Discord application public key"
+            }
+            else {
+                Assert-Control ($gatewayNames -notcontains "DISCORD_PUBLIC_KEY") "Gateway-mode bundle excludes the unused Discord application public key"
+            }
         }
     }
     $resolvedConfigPath = [IO.Path]::GetFullPath($ConfigPath)
     $baseUrl = [Uri]$config.openCode.baseUrl
     Assert-Control ($baseUrl.Scheme -eq "http" -and $baseUrl.Host -in @("127.0.0.1", "::1")) "OpenCode endpoint is a loopback literal"
-    Assert-Control (@($config.slack.allowedWorkspaceIds).Count -gt 0) "Slack workspace allowlist is configured"
-    Assert-Control (@($config.slack.allowedUserIds).Count -gt 0) "Slack user allowlist is configured"
+    if ($slackEnabled) {
+        Assert-Control (@($config.slack.allowedWorkspaceIds).Count -gt 0) "Slack workspace allowlist is configured"
+        Assert-Control (@($config.slack.allowedUserIds).Count -gt 0) "Slack user allowlist is configured"
+    }
+    if ($discordEnabled) {
+        Assert-Control (@($config.discord.allowedGuildIds).Count -gt 0) "Discord guild allowlist is configured"
+        Assert-Control (@($config.discord.allowedUserIds).Count -gt 0) "Discord user allowlist is configured"
+    }
     Assert-Control ($config.slack.liveUpdates -ne $true) "live Slack output is disabled"
     Assert-Control ($config.slack.nativeStreaming -ne $true) "native Slack streaming is disabled"
     Assert-Control ([int]$config.limits.maxConcurrentJobsPerUser -le 1) "per-user concurrency is at most one"
@@ -113,7 +129,7 @@ if (Test-Path $ConfigPath) {
     Assert-Control (Test-IsWithin (Resolve-ConfiguredPath $config.storage.auditLogPath $resolvedConfigPath) $GatewayDataDirectory) "JSONL audit storage is inside the gateway data directory"
     Assert-Control (Test-IsWithin (Resolve-ConfiguredPath $config.storage.worktreeRoot $resolvedConfigPath) $WorkerDataDirectory) "worktree storage is inside the worker data directory"
 
-    if ($slackIngress -eq "events-api") {
+    if ($slackEnabled -and $slackIngress -eq "events-api") {
         $http = $config.slack.http
         Assert-Control ($http.host -eq "127.0.0.1") "Events API listener uses the reviewed loopback IPv4 address"
         Assert-Control ([int]$http.maxBodyBytes -gt 0 -and [int]$http.maxBodyBytes -le 262144) "private request-body limit is at most 256 KiB"
@@ -161,6 +177,47 @@ if (Test-Path $ConfigPath) {
 
         $timeService = Get-Service W32Time -ErrorAction SilentlyContinue
         Assert-Control ($timeService -and $timeService.Status -eq "Running") "Windows Time is running for Slack replay protection"
+    }
+    if ($discordEnabled) {
+        Assert-Control ($discordIngress -in @("gateway", "http")) "Discord ingress is gateway or http"
+        $discordHttp = $config.discord.http
+        if ($discordIngress -eq "gateway") {
+            $discordListeners = @(Get-NetTCPConnection -LocalPort ([int]$discordHttp.port) -State Listen -ErrorAction SilentlyContinue)
+            Assert-Control ($discordListeners.Count -eq 0) "Discord Gateway mode opens no HTTP listener"
+        }
+        else {
+            Assert-Control ($discordHttp.host -eq "127.0.0.1") "Discord listener uses the reviewed loopback IPv4 address"
+            Assert-Control ([int]$discordHttp.maxBodyBytes -gt 0 -and [int]$discordHttp.maxBodyBytes -le 262144) "Discord request-body limit is at most 256 KiB"
+            Assert-Control ([int]$discordHttp.maxHeaderBytes -gt 0 -and [int]$discordHttp.maxHeaderBytes -le 16384) "Discord request-header limit is at most 16 KiB"
+            Assert-Control ([int]$discordHttp.requestTimeoutMs -gt 0 -and [int]$discordHttp.requestTimeoutMs -le 2500) "Discord request timeout is at most 2.5 seconds"
+            Assert-Control ([int]$discordHttp.headersTimeoutMs -le [int]$discordHttp.requestTimeoutMs) "Discord header timeout does not exceed its request timeout"
+            Assert-Control ([int]$discordHttp.maxConnections -gt 0 -and [int]$discordHttp.maxConnections -le 100) "Discord listener accepts at most 100 connections"
+            $discordListeners = @(Get-NetTCPConnection -LocalPort ([int]$discordHttp.port) -State Listen -ErrorAction SilentlyContinue)
+            Assert-Control (@($discordListeners | Where-Object { $_.LocalAddress -eq "127.0.0.1" }).Count -gt 0) "Discord private listener is running on IPv4 loopback"
+            Assert-Control (
+                $discordListeners.Count -gt 0 -and
+                @($discordListeners | Where-Object { $_.LocalAddress -notin @("127.0.0.1", "::1") }).Count -eq 0
+            ) "Discord port has no non-loopback listener"
+            $discordEdgeConfigExists = $false
+            if (-not [string]::IsNullOrWhiteSpace($EdgeConfigPath)) {
+                $resolvedDiscordEdgeConfigPath = [IO.Path]::GetFullPath($EdgeConfigPath)
+                $discordEdgeConfigExists = Test-Path -LiteralPath $resolvedDiscordEdgeConfigPath -PathType Leaf
+            }
+            Assert-Control $discordEdgeConfigExists "installed NGINX configuration exists for Discord"
+            $discordNginxCommand = Get-Command $NginxPath -ErrorAction SilentlyContinue
+            Assert-Control ($null -ne $discordNginxCommand) "NGINX executable is available for Discord edge validation"
+            if ($discordEdgeConfigExists -and $discordNginxCommand) {
+                $discordEdgeOutput = @(& $discordNginxCommand.Source -T -c $resolvedDiscordEdgeConfigPath 2>&1)
+                Assert-Control ($LASTEXITCODE -eq 0) "installed NGINX configuration passes Discord edge validation"
+                $discordEdge = $discordEdgeOutput -join [Environment]::NewLine
+                $interactionsPathPattern = [regex]::Escape([string]$discordHttp.interactionsPath)
+                Assert-Control ($discordEdge -match "(?m)^\s*location\s+=\s+$interactionsPathPattern\s+\{") "edge exposes the configured exact Discord interaction route"
+                $expectedDiscordUpstream = "(?m)^\s*server\s+127\.0\.0\.1:$([int]$discordHttp.port);"
+                Assert-Control ($discordEdge -match $expectedDiscordUpstream) "edge upstream is the configured loopback Discord listener"
+            }
+            $timeService = Get-Service W32Time -ErrorAction SilentlyContinue
+            Assert-Control ($timeService -and $timeService.Status -eq "Running") "Windows Time is running for Discord replay protection"
+        }
     }
 }
 else {

@@ -51,6 +51,18 @@ async function main(): Promise<void> {
       },
     });
   }
+  if (config.discord.enabled) {
+    checks.push({
+      name: "Discord credential shapes",
+      run: async () => {
+        if (!secrets.discordBotToken?.trim()) throw new Error("DISCORD_BOT_TOKEN must be non-empty");
+        if (config.discord.ingress === "http" && (!secrets.discordPublicKey || !/^[0-9a-f]{64}$/i.test(secrets.discordPublicKey))) {
+          throw new Error("DISCORD_PUBLIC_KEY must be a 64-character hexadecimal Ed25519 public key");
+        }
+        return `${config.discord.ingress}:${config.discord.commandName}`;
+      },
+    });
+  }
 
   let failed = false;
   for (const check of checks) {

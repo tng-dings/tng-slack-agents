@@ -1,4 +1,26 @@
 {
+  "discord": {
+    "enabled": false,
+    "ingress": "gateway",
+    "applicationId": "123456789012345678",
+    "commandName": "agent",
+    "allowedGuildIds": ["123456789012345678"],
+    "allowedUserIds": ["123456789012345678"],
+    "maxOutputCharacters": 20000,
+    "http": {
+      "host": "127.0.0.1",
+      "port": 3001,
+      "interactionsPath": "/discord/interactions",
+      "healthPath": "/healthz",
+      "maxBodyBytes": 262144,
+      "maxHeaderBytes": 16384,
+      "requestTimeoutMs": 2500,
+      "headersTimeoutMs": 2500,
+      "keepAliveTimeoutMs": 5000,
+      "maxRequestsPerSocket": 100,
+      "maxConnections": 100
+    }
+  },
   "slack": {
     "enabled": true,
     "ingress": "socket",

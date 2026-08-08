@@ -8,9 +8,34 @@ export interface IntegrationAuthorization {
 }
 
 export type SlackIngressTransport = "socket" | "events-api";
+export type DiscordIngressTransport = "gateway" | "http";
+
+export interface DiscordConfig {
+  enabled: boolean;
+  ingress: DiscordIngressTransport;
+  applicationId?: string;
+  commandName: string;
+  allowedGuildIds: string[];
+  allowedUserIds: string[];
+  maxOutputCharacters: number;
+  http: {
+    host: string;
+    port: number;
+    interactionsPath: string;
+    healthPath: string;
+    maxBodyBytes: number;
+    maxHeaderBytes: number;
+    requestTimeoutMs: number;
+    headersTimeoutMs: number;
+    keepAliveTimeoutMs: number;
+    maxRequestsPerSocket: number;
+    maxConnections: number;
+  };
+}
 
 export interface RunnerConfig {
   integrations: Partial<Record<IntegrationId, IntegrationAuthorization>>;
+  discord: DiscordConfig;
   slack: {
     enabled: boolean;
     ingress: SlackIngressTransport;
@@ -63,6 +88,8 @@ export interface RunnerConfig {
 }
 
 export interface RunnerSecrets {
+  discordBotToken?: string;
+  discordPublicKey?: string;
   slackBotToken?: string;
   slackAppToken?: string;
   slackSigningSecret?: string;
@@ -96,6 +123,19 @@ const defaults = {
   slackHttpKeepAliveTimeoutMs: 5_000,
   slackHttpMaxRequestsPerSocket: 100,
   slackHttpMaxConnections: 100,
+  discordCommandName: "agent",
+  discordIngress: "gateway",
+  discordMaxOutputCharacters: 20_000,
+  discordHttpHost: "127.0.0.1",
+  discordHttpPort: 3001,
+  discordInteractionsPath: "/discord/interactions",
+  discordHttpMaxBodyBytes: 256 * 1024,
+  discordHttpMaxHeaderBytes: 16 * 1024,
+  discordHttpRequestTimeoutMs: 2_500,
+  discordHttpHeadersTimeoutMs: 2_500,
+  discordHttpKeepAliveTimeoutMs: 5_000,
+  discordHttpMaxRequestsPerSocket: 100,
+  discordHttpMaxConnections: 100,
 } as const;
 
 function object(value: unknown, name: string): Record<string, unknown> {
@@ -151,6 +191,14 @@ function slackIngress(value: unknown): SlackIngressTransport {
   return result;
 }
 
+function discordIngress(value: unknown): DiscordIngressTransport {
+  const result = value ?? defaults.discordIngress;
+  if (result !== "gateway" && result !== "http") {
+    throw new Error('discord.ingress must be "gateway" or "http"');
+  }
+  return result;
+}
+
 function routePath(value: unknown, fallback: string, name: string): string {
   const result = value ?? fallback;
   if (typeof result !== "string" || !/^\/[A-Za-z0-9/_-]*$/.test(result)) {
@@ -159,10 +207,18 @@ function routePath(value: unknown, fallback: string, name: string): string {
   return result;
 }
 
-function privateHttpHost(value: unknown): string {
-  const result = typeof value === "string" && value.trim() ? value.trim() : defaults.slackHttpHost;
-  if (result !== defaults.slackHttpHost) {
-    throw new Error("slack.http.host must be the reviewed loopback IPv4 literal 127.0.0.1");
+function privateHttpHost(value: unknown, fallback: string, name: string): string {
+  const result = typeof value === "string" && value.trim() ? value.trim() : fallback;
+  if (result !== "127.0.0.1") {
+    throw new Error(`${name} must be the reviewed loopback IPv4 literal 127.0.0.1`);
+  }
+  return result;
+}
+
+function discordCommandName(value: unknown): string {
+  const result = value ?? defaults.discordCommandName;
+  if (typeof result !== "string" || !/^[a-z0-9_-]{1,32}$/.test(result)) {
+    throw new Error("discord.commandName must contain 1-32 lowercase letters, numbers, hyphens, or underscores");
   }
   return result;
 }
@@ -189,6 +245,8 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
   const root = object(JSON.parse(await readFile(absoluteConfigPath, "utf8")), "config");
   const slack = object(root.slack, "slack");
   const slackHttp = object(slack.http ?? {}, "slack.http");
+  const discord = object(root.discord ?? {}, "discord");
+  const discordHttp = object(discord.http ?? {}, "discord.http");
   const openCode = object(root.openCode, "openCode");
   const limits = object(root.limits ?? {}, "limits");
   const storage = object(root.storage, "storage");
@@ -224,6 +282,52 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
     throw new Error("slack.http.headersTimeoutMs must be less than or equal to slack.http.requestTimeoutMs");
   }
 
+  const discordEnabled = discord.enabled === true;
+  const discordIngressTransport = discordIngress(discord.ingress);
+  const discordApplicationId = typeof discord.applicationId === "string" && discord.applicationId.trim()
+    ? discord.applicationId.trim()
+    : undefined;
+  const discordAllowedGuildIds = stringArray(discord.allowedGuildIds ?? [], "discord.allowedGuildIds");
+  const discordAllowedUserIds = stringArray(discord.allowedUserIds ?? [], "discord.allowedUserIds");
+  if (discordEnabled && !discordApplicationId) {
+    throw new Error("discord.applicationId is required when Discord is enabled");
+  }
+  if (discordEnabled && discordAllowedGuildIds.length === 0) {
+    throw new Error("discord.allowedGuildIds must not be empty when Discord is enabled");
+  }
+  if (discordEnabled && discordAllowedUserIds.length === 0) {
+    throw new Error("discord.allowedUserIds must not be empty when Discord is enabled");
+  }
+  const interactionsPath = routePath(
+    discordHttp.interactionsPath,
+    defaults.discordInteractionsPath,
+    "discord.http.interactionsPath",
+  );
+  const discordHealthPath = routePath(discordHttp.healthPath, defaults.healthPath, "discord.http.healthPath");
+  if (interactionsPath === discordHealthPath) {
+    throw new Error("discord.http.interactionsPath and discord.http.healthPath must differ");
+  }
+  const discordRequestTimeoutMs = boundedPositiveInteger(
+    discordHttp.requestTimeoutMs,
+    defaults.discordHttpRequestTimeoutMs,
+    defaults.discordHttpRequestTimeoutMs,
+    "discord.http.requestTimeoutMs",
+  );
+  const discordHeadersTimeoutMs = boundedPositiveInteger(
+    discordHttp.headersTimeoutMs,
+    defaults.discordHttpHeadersTimeoutMs,
+    defaults.discordHttpHeadersTimeoutMs,
+    "discord.http.headersTimeoutMs",
+  );
+  if (discordHeadersTimeoutMs > discordRequestTimeoutMs) {
+    throw new Error("discord.http.headersTimeoutMs must be less than or equal to discord.http.requestTimeoutMs");
+  }
+  const discordPort = tcpPort(discordHttp.port, defaults.discordHttpPort, "discord.http.port");
+  const slackPort = tcpPort(slackHttp.port, defaults.slackHttpPort, "slack.http.port");
+  if (discordEnabled && discordIngressTransport === "http" && enabled && ingress === "events-api" && discordPort === slackPort) {
+    throw new Error("discord.http.port must differ from slack.http.port when both HTTPS integrations are enabled");
+  }
+
   let model: RunnerConfig["openCode"]["model"];
   if (openCode.model !== undefined) {
     const rawModel = object(openCode.model, "openCode.model");
@@ -236,6 +340,35 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
   return {
     integrations: {
       slack: { allowedTenants: allowedWorkspaceIds, allowedActors: allowedUserIds },
+      ...(discordEnabled ? {
+        discord: { allowedTenants: discordAllowedGuildIds, allowedActors: discordAllowedUserIds },
+      } : {}),
+    },
+    discord: {
+      enabled: discordEnabled,
+      ingress: discordIngressTransport,
+      ...(discordApplicationId ? { applicationId: discordApplicationId } : {}),
+      commandName: discordCommandName(discord.commandName),
+      allowedGuildIds: discordAllowedGuildIds,
+      allowedUserIds: discordAllowedUserIds,
+      maxOutputCharacters: positiveInteger(
+        discord.maxOutputCharacters,
+        defaults.discordMaxOutputCharacters,
+        "discord.maxOutputCharacters",
+      ),
+      http: {
+        host: privateHttpHost(discordHttp.host, defaults.discordHttpHost, "discord.http.host"),
+        port: discordPort,
+        interactionsPath,
+        healthPath: discordHealthPath,
+        maxBodyBytes: boundedPositiveInteger(discordHttp.maxBodyBytes, defaults.discordHttpMaxBodyBytes, defaults.discordHttpMaxBodyBytes, "discord.http.maxBodyBytes"),
+        maxHeaderBytes: boundedPositiveInteger(discordHttp.maxHeaderBytes, defaults.discordHttpMaxHeaderBytes, defaults.discordHttpMaxHeaderBytes, "discord.http.maxHeaderBytes"),
+        requestTimeoutMs: discordRequestTimeoutMs,
+        headersTimeoutMs: discordHeadersTimeoutMs,
+        keepAliveTimeoutMs: boundedPositiveInteger(discordHttp.keepAliveTimeoutMs, defaults.discordHttpKeepAliveTimeoutMs, defaults.discordHttpKeepAliveTimeoutMs, "discord.http.keepAliveTimeoutMs"),
+        maxRequestsPerSocket: boundedPositiveInteger(discordHttp.maxRequestsPerSocket, defaults.discordHttpMaxRequestsPerSocket, defaults.discordHttpMaxRequestsPerSocket, "discord.http.maxRequestsPerSocket"),
+        maxConnections: boundedPositiveInteger(discordHttp.maxConnections, defaults.discordHttpMaxConnections, defaults.discordHttpMaxConnections, "discord.http.maxConnections"),
+      },
     },
     slack: {
       enabled,
@@ -246,8 +379,8 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
       liveUpdates: slack.liveUpdates === true,
       nativeStreaming: false,
       http: {
-        host: privateHttpHost(slackHttp.host),
-        port: tcpPort(slackHttp.port, defaults.slackHttpPort, "slack.http.port"),
+        host: privateHttpHost(slackHttp.host, defaults.slackHttpHost, "slack.http.host"),
+        port: slackPort,
         eventsPath,
         healthPath,
         maxBodyBytes: boundedPositiveInteger(slackHttp.maxBodyBytes, defaults.slackHttpMaxBodyBytes, defaults.slackHttpMaxBodyBytes, "slack.http.maxBodyBytes"),
@@ -297,6 +430,8 @@ export function loadSecrets(config: RunnerConfig): RunnerSecrets {
   const slackBotToken = process.env.SLACK_BOT_TOKEN;
   const slackAppToken = process.env.SLACK_APP_TOKEN;
   const slackSigningSecret = process.env.SLACK_SIGNING_SECRET;
+  const discordBotToken = process.env.DISCORD_BOT_TOKEN;
+  const discordPublicKey = process.env.DISCORD_PUBLIC_KEY;
   if (config.slack.enabled && !slackBotToken) {
     throw new Error("SLACK_BOT_TOKEN is required when Slack is enabled");
   }
@@ -306,8 +441,19 @@ export function loadSecrets(config: RunnerConfig): RunnerSecrets {
   if (config.slack.enabled && config.slack.ingress === "events-api" && !slackSigningSecret) {
     throw new Error("SLACK_SIGNING_SECRET is required when Slack Events API ingress is enabled");
   }
+  if (config.discord.enabled && !discordBotToken) {
+    throw new Error("DISCORD_BOT_TOKEN is required when Discord is enabled");
+  }
+  if (config.discord.enabled && config.discord.ingress === "http" && !discordPublicKey) {
+    throw new Error("DISCORD_PUBLIC_KEY is required when Discord HTTP ingress is enabled");
+  }
+  if (config.discord.enabled && config.discord.ingress === "http" && discordPublicKey && !/^[0-9a-f]{64}$/i.test(discordPublicKey)) {
+    throw new Error("DISCORD_PUBLIC_KEY must be a 64-character hexadecimal Ed25519 public key");
+  }
   return {
     openCodePassword,
+    ...(discordBotToken ? { discordBotToken } : {}),
+    ...(discordPublicKey ? { discordPublicKey } : {}),
     ...(slackBotToken ? { slackBotToken } : {}),
     ...(slackAppToken ? { slackAppToken } : {}),
     ...(slackSigningSecret ? { slackSigningSecret } : {}),

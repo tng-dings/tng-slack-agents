@@ -54,7 +54,7 @@ test("runner persists jobs and sessions, enforces authz, accounts usage, and red
     tenantId: "T1",
     conversationId: "D1",
     threadId: "100.1",
-    replyTs: "100.2",
+    deliveryMessageId: "100.2",
     actorId: "U_ALLOWED",
     prompt: "Do work with password=super-secret",
   };
@@ -138,6 +138,7 @@ test("runner marks an in-flight job failed after restart instead of replaying it
 test("runner persists attachments and passes them to the executor", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-attachments-"));
   const config = testConfig(root);
+  config.limits.maxAttachmentBytes = 4;
   const database = new RunnerDatabase(config.storage.databasePath);
   const audit = new AuditLogger(config.storage.auditLogPath, database, ["secret"]);
   let capturedAttachments: Attachment[] | undefined;
@@ -156,7 +157,7 @@ test("runner persists attachments and passes them to the executor", async () => 
     fail: async () => undefined,
   }));
   await runner.start();
-  const attachment: Attachment = { mime: "image/png", filename: "screenshot.png", dataUrl: "data:image/png;base64,iVBOR" };
+  const attachment: Attachment = { mime: "image/png", filename: "screenshot.png", dataUrl: "data:image/png;base64,AQIDBA==" };
   const { job } = await runner.submit({
     integration: "slack",
     sourceEventId: "attach-event-1",
@@ -172,6 +173,32 @@ test("runner persists attachments and passes them to the executor", async () => 
   const stored = database.getJob(job.id);
   assert.equal(stored?.attachments.length, 1);
   assert.equal(stored?.attachments[0]?.filename, "screenshot.png");
+  await assert.rejects(
+    runner.submit({
+      integration: "slack",
+      sourceEventId: "attach-event-too-large",
+      tenantId: "T1",
+      conversationId: "D1",
+      threadId: "300.2",
+      actorId: "U_ALLOWED",
+      prompt: "Review a larger screenshot",
+      attachments: [{ mime: "image/png", filename: "large.png", dataUrl: "data:image/png;base64,AQIDBAU=" }],
+    }),
+    /attachment exceeds/i,
+  );
+  await assert.rejects(
+    runner.submit({
+      integration: "slack",
+      sourceEventId: "attach-event-malformed",
+      tenantId: "T1",
+      conversationId: "D1",
+      threadId: "300.3",
+      actorId: "U_ALLOWED",
+      prompt: "Review a malformed screenshot",
+      attachments: [{ mime: "image/png", filename: "bad.png", dataUrl: "data:image/png;base64,!!!!" }],
+    }),
+    /attachment exceeds/i,
+  );
   await runner.stop();
   database.close();
   await rm(root, { recursive: true, force: true });
@@ -276,8 +303,8 @@ test("database idempotently upgrades legacy Slack identity rows", async () => {
     INSERT INTO sessions VALUES ('T1:D1:1.0', 'T1', 'D1', '1.0', 'oc-1', '/worktree', '2026-01-01', '2026-01-01');
     INSERT INTO jobs(
       id, source_event_id, session_key, workspace_id, channel_id, thread_ts,
-      user_id, prompt, status, created_at
-    ) VALUES ('legacy-job', 'Ev1', 'T1:D1:1.0', 'T1', 'D1', '1.0', 'U1', 'work', 'queued', '2026-01-01');
+      reply_ts, user_id, prompt, status, created_at
+    ) VALUES ('legacy-job', 'Ev1', 'T1:D1:1.0', 'T1', 'D1', '1.0', 'legacy-reply', 'U1', 'work', 'queued', '2026-01-01');
   `);
   legacy.close();
 
@@ -304,6 +331,7 @@ test("database idempotently upgrades legacy Slack identity rows", async () => {
     },
   );
   assert.equal(migrated.getSession("slack:T1:D1:1.0")?.integration, "slack");
+  assert.equal(job?.deliveryMessageId, "legacy-reply");
   migrated.close();
 
   const reopened = new RunnerDatabase(filename);
@@ -434,7 +462,7 @@ test("Slack reporter uses native streaming with the correct destination", async 
     tenantId: "T1",
     conversationId: "D1",
     threadId: "1.0",
-    replyTs: "1.1",
+    deliveryMessageId: "1.1",
     actorId: "U1",
     prompt: "hello",
     attachments: [],

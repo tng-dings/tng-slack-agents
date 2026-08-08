@@ -30,10 +30,10 @@ export class SlackJobReporter implements JobReporter {
     private readonly liveUpdates = true,
     private readonly secrets: string[] = [],
   ) {
-    this.replyTs = job.replyTs;
+    this.replyTs = job.deliveryMessageId;
   }
 
-  async start(): Promise<{ replyTs?: string } | void> {
+  async start(): Promise<{ deliveryMessageId?: string } | void> {
     await this.setStatus("Working…");
     if (this.replyTs) return;
     const posted = await this.client.chat.postMessage({
@@ -43,7 +43,7 @@ export class SlackJobReporter implements JobReporter {
     });
     if (posted.ts) {
       this.replyTs = posted.ts;
-      return { replyTs: posted.ts };
+      return { deliveryMessageId: posted.ts };
     }
   }
 

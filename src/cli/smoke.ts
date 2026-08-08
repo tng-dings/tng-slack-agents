@@ -9,7 +9,11 @@ const defaultPrompt = "Inspect this repository, identify the main technology sta
 
 async function main(): Promise<void> {
   const config = await loadConfig();
-  const secrets = loadSecrets({ ...config, slack: { ...config.slack, enabled: false } });
+  const secrets = loadSecrets({
+    ...config,
+    discord: { ...config.discord, enabled: false },
+    slack: { ...config.slack, enabled: false },
+  });
   const database = new RunnerDatabase(config.storage.databasePath);
   const audit = new AuditLogger(
     config.storage.auditLogPath,

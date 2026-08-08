@@ -15,8 +15,8 @@ $plainBytes = [Security.Cryptography.ProtectedData]::Unprotect(
 try {
     $secrets = [Text.Encoding]::UTF8.GetString($plainBytes) | ConvertFrom-Json
     foreach ($property in $secrets.PSObject.Properties) {
-        if ($property.Name -like "SLACK_*") {
-            throw "Refusing to inject a Slack credential into the OpenCode worker"
+        if ($property.Name -like "SLACK_*" -or $property.Name -like "DISCORD_*") {
+            throw "Refusing to inject an integration credential into the OpenCode worker"
         }
         [Environment]::SetEnvironmentVariable($property.Name, [string]$property.Value, "Process")
     }

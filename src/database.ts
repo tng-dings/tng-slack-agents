@@ -3,6 +3,7 @@ import path from "node:path";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import type {
   Attachment,
+  DiscordThreadRecord,
   InboundEventRecord,
   IntegrationId,
   JobRecord,
@@ -46,7 +47,7 @@ function mapJob(row: Row): JobRecord {
     tenantId: String(row.tenant_id),
     conversationId: String(row.conversation_id),
     threadId: String(row.thread_id),
-    replyTs: row.reply_ts === null ? null : String(row.reply_ts),
+    deliveryMessageId: row.delivery_message_id === null ? null : String(row.delivery_message_id),
     actorId: String(row.actor_id),
     prompt: String(row.prompt),
     attachments: parseAttachments(row.attachments),
@@ -98,6 +99,16 @@ function mapInboundEvent(row: Row): InboundEventRecord {
   };
 }
 
+function mapDiscordThread(row: Row): DiscordThreadRecord {
+  return {
+    threadId: String(row.thread_id),
+    guildId: String(row.guild_id),
+    parentChannelId: String(row.parent_channel_id),
+    ownerUserId: String(row.owner_user_id),
+    createdAt: String(row.created_at),
+  };
+}
+
 export class RunnerDatabase {
   readonly sqlite: DatabaseSync;
 
@@ -140,6 +151,7 @@ export class RunnerDatabase {
         workspace_id TEXT NOT NULL,
         channel_id TEXT NOT NULL,
         thread_ts TEXT NOT NULL,
+        delivery_message_id TEXT,
         reply_ts TEXT,
         user_id TEXT NOT NULL,
         prompt TEXT NOT NULL,
@@ -196,6 +208,17 @@ export class RunnerDatabase {
 
       CREATE INDEX IF NOT EXISTS inbound_events_claim_idx
         ON inbound_events(integration, status, available_at, received_at);
+
+      CREATE TABLE IF NOT EXISTS discord_threads (
+        thread_id TEXT PRIMARY KEY,
+        guild_id TEXT NOT NULL,
+        parent_channel_id TEXT NOT NULL,
+        owner_user_id TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS discord_threads_guild_owner_idx
+        ON discord_threads(guild_id, owner_user_id);
     `);
 
     const jobColumns = this.sqlite.prepare("PRAGMA table_info(jobs)").all() as Row[];
@@ -235,6 +258,10 @@ export class RunnerDatabase {
             actor_id = user_id;
         `);
       });
+    }
+    const normalizedJobColumns = this.sqlite.prepare("PRAGMA table_info(jobs)").all() as Row[];
+    if (!normalizedJobColumns.some((col) => String(col.name) === "delivery_message_id")) {
+      this.sqlite.exec("ALTER TABLE jobs ADD COLUMN delivery_message_id TEXT; UPDATE jobs SET delivery_message_id = reply_ts WHERE reply_ts IS NOT NULL;");
     }
     this.sqlite.exec("CREATE INDEX IF NOT EXISTS jobs_actor_status_idx ON jobs(actor_id, status)");
 
@@ -314,8 +341,13 @@ export class RunnerDatabase {
     `).run(openCodeSessionId, workingDirectory, now(), sessionKey);
   }
 
-  updateJobReplyTs(id: string, replyTs: string): void {
-    this.sqlite.prepare("UPDATE jobs SET reply_ts = ? WHERE id = ?").run(replyTs, id);
+  updateJobDeliveryMessageId(id: string, deliveryMessageId: string): void {
+    this.sqlite.prepare(`
+      UPDATE jobs SET
+        delivery_message_id = ?,
+        reply_ts = CASE WHEN integration = 'slack' THEN ? ELSE reply_ts END
+      WHERE id = ?
+    `).run(deliveryMessageId, deliveryMessageId, id);
   }
 
   insertInboundEvent(
@@ -346,6 +378,24 @@ export class RunnerDatabase {
     const row = this.sqlite.prepare("SELECT * FROM inbound_events WHERE event_key = ?")
       .get(`${integration}:${sourceEventId}`) as Row | undefined;
     return row ? mapInboundEvent(row) : undefined;
+  }
+
+  getDiscordThread(threadId: string): DiscordThreadRecord | undefined {
+    const row = this.sqlite.prepare("SELECT * FROM discord_threads WHERE thread_id = ?").get(threadId) as Row | undefined;
+    return row ? mapDiscordThread(row) : undefined;
+  }
+
+  registerDiscordThread(thread: Omit<DiscordThreadRecord, "createdAt">): DiscordThreadRecord {
+    const createdAt = now();
+    this.sqlite.prepare(`
+      INSERT INTO discord_threads(thread_id, guild_id, parent_channel_id, owner_user_id, created_at)
+      VALUES (?, ?, ?, ?, ?)
+      ON CONFLICT(thread_id) DO UPDATE SET
+        guild_id = excluded.guild_id,
+        parent_channel_id = excluded.parent_channel_id,
+        owner_user_id = excluded.owner_user_id
+    `).run(thread.threadId, thread.guildId, thread.parentChannelId, thread.ownerUserId, createdAt);
+    return this.getDiscordThread(thread.threadId)!;
   }
 
   claimNextInboundEvent(integration: IntegrationId): InboundEventRecord | undefined {
@@ -407,8 +457,9 @@ export class RunnerDatabase {
       this.sqlite.prepare(`
         INSERT INTO jobs(
           id, source_event_id, session_key, integration, tenant_id, conversation_id, thread_id, actor_id,
-          workspace_id, channel_id, thread_ts, reply_ts, user_id, prompt, attachments, status, error, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          workspace_id, channel_id, thread_ts, delivery_message_id, reply_ts,
+          user_id, prompt, attachments, status, error, created_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id,
         `${submission.integration}:${submission.sourceEventId}`,
@@ -421,7 +472,8 @@ export class RunnerDatabase {
         submission.tenantId,
         submission.conversationId,
         submission.threadId,
-        submission.replyTs ?? null,
+        submission.deliveryMessageId ?? null,
+        submission.integration === "slack" ? submission.deliveryMessageId ?? null : null,
         submission.actorId,
         submission.prompt,
         attachments.length > 0 ? (JSON.stringify(attachments) as SQLInputValue) : null,
@@ -521,6 +573,13 @@ export class RunnerDatabase {
       this.sqlite.prepare("DELETE FROM daily_usage WHERE usage_date < ?").run(cutoff.slice(0, 10));
       this.sqlite.prepare("DELETE FROM jobs WHERE finished_at IS NOT NULL AND finished_at < ?").run(cutoff);
       this.sqlite.prepare("DELETE FROM inbound_events WHERE status = 'processed' AND processed_at < ?").run(cutoff);
+      this.sqlite.prepare(`
+        DELETE FROM discord_threads WHERE created_at < ?
+          AND NOT EXISTS (
+            SELECT 1 FROM jobs
+            WHERE jobs.integration = 'discord' AND jobs.thread_id = discord_threads.thread_id
+          )
+      `).run(cutoff);
       const rows = this.sqlite.prepare(`
         SELECT * FROM sessions WHERE updated_at < ?
           AND NOT EXISTS (SELECT 1 FROM jobs WHERE jobs.session_key = sessions.session_key)

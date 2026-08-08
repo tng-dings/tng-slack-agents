@@ -5,6 +5,27 @@ export function testConfig(root: string): RunnerConfig {
     integrations: {
       slack: { allowedTenants: ["T1"], allowedActors: ["U_ALLOWED"] },
     },
+    discord: {
+      enabled: false,
+      ingress: "gateway",
+      commandName: "agent",
+      allowedGuildIds: [],
+      allowedUserIds: [],
+      maxOutputCharacters: 20_000,
+      http: {
+        host: "127.0.0.1",
+        port: 3001,
+        interactionsPath: "/discord/interactions",
+        healthPath: "/healthz",
+        maxBodyBytes: 256 * 1024,
+        maxHeaderBytes: 16 * 1024,
+        requestTimeoutMs: 2_500,
+        headersTimeoutMs: 2_500,
+        keepAliveTimeoutMs: 5_000,
+        maxRequestsPerSocket: 100,
+        maxConnections: 100,
+      },
+    },
     slack: {
       enabled: false,
       ingress: "socket",
