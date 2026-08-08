@@ -1,24 +1,25 @@
-# Self-hosted Slack agent runner
+# Self-hosted Slack and Discord agent runner
 
-This service accepts allowlisted direct messages from a Slack agent app, persists them as jobs in SQLite, and runs them through an authenticated localhost OpenCode server on Windows. Each Slack thread retains one OpenCode session and one detached Git worktree.
+This service accepts allowlisted Slack direct messages and Discord agent-thread conversations, persists them as integration-namespaced jobs in SQLite, and runs them through an authenticated localhost OpenCode server on Windows. Slack threads and bot-created Discord threads retain an OpenCode session and detached Git worktree.
 
 ## Current MVP behavior
 
 - Slack Bolt with configurable Socket Mode or Events API HTTPS ingress and the current `agent_view` experience.
-- DM-only messages; bot messages and other conversation types are ignored. Image attachments (screenshots) are downloaded and forwarded to OpenCode as file parts.
+- Discord Gateway ingress with a guild-scoped `/agent` command that creates an owned public thread; ordinary owner messages in that thread continue the same session and may include one image.
+- Slack messages are DM-only; Discord accepts only the configured slash command and owner messages in registered agent threads. Bot and unsupported message types are ignored. Image attachments (screenshots) are downloaded and forwarded to OpenCode as file parts.
 - Immediate `Working…` reply after authorization and event deduplication. Live updates are disabled by default so output can be redacted before delivery.
-- Durable SQLite queue and OpenCode session mapping keyed by workspace, channel, and thread timestamp.
+- Durable SQLite queue and OpenCode session mapping keyed by normalized integration, tenant, conversation, and thread identities.
 - Per-thread serialization, per-user/global concurrency limits, queue limit, timeout, allowlist, and daily cost cap.
 - Bounded JSONL and SQLite audit records containing content hashes/lengths, usage, failures, and tool metadata; automatic 30-day retention is enabled by default.
-- A detached Git worktree per Slack thread. Running work is never silently replayed after a process crash; it is marked failed, while queued jobs survive.
-- Separate DPAPI-protected gateway and worker secret bundles, distinct Windows virtual service identities, and explicit denial of Slack credentials in the worker launcher.
+- A detached Git worktree per Slack or Discord session. Running work is never silently replayed after a process crash; it is marked failed, while queued jobs survive.
+- Separate DPAPI-protected gateway and worker secret bundles, distinct Windows virtual service identities, and explicit denial of Slack and Discord credentials in the worker launcher.
 
 ## Prerequisites
 
 - Windows with Node.js 22.13 or later, Git, and a repository containing at least one commit.
 - OpenCode installed natively, for example `npm install -g opencode-ai`.
 - A configured OpenCode model provider. For a service deployment, prefer a provider API key injected by the DPAPI launcher rather than an interactive user login.
-- A Slack app approved and installed by the workspace administrators. See [the admin checklist](docs/slack-admin-checklist.md).
+- An approved Slack app and/or Discord application. See the [Slack checklist](docs/slack-admin-checklist.md) and [Discord checklist](docs/discord-admin-checklist.md).
 
 OpenCode officially recommends WSL for the best Windows compatibility, but this MVP intentionally supports native Windows. The executor interface allows a later WSL or remote-worker implementation without changing Slack or queue code.
 
@@ -76,6 +77,22 @@ The built-in listener is plain HTTP and must not be exposed directly to the inte
 
 Production Events API deployments must follow the [public endpoint hardening runbook](docs/public-endpoint-hardening.md). The supplied NGINX configuration exposes only the exact event and health routes, buffers and limits requests before Bolt, applies connection/rate limits, and proxies to the loopback-only Node listener.
 
+## Discord Gateway development run
+
+Set `discord.enabled` to `true`, set `discord.ingress` to `"gateway"`, and configure the exact application, guild, and user IDs. Enable the Guilds, Guild Messages, and Message Content intents for the bot. The command is `/agent prompt:<required> attachment:<optional image>` and is accepted only in a normal guild channel.
+
+```powershell
+$env:OPENCODE_SERVER_PASSWORD = '<server-password>'
+$env:DISCORD_BOT_TOKEN = '<bot-token>'
+npm run discord:register
+npm run doctor
+npm run dev
+```
+
+Do not configure an Interactions Endpoint URL in Gateway mode. AgentRunner opens an outbound WebSocket, durably accepts the slash command, acknowledges it without persisting the interaction token, creates a bot-owned public thread, and submits the first job against that thread ID. Later non-bot messages from the initiating user in that registered thread are durably deduplicated by Discord message ID and reuse the same OpenCode session and worktree.
+
+The bot posts `Working…` and edits that message with the redacted result. Results are public to everyone who can view the thread. DMs, slash commands inside threads, unrelated threads, other users, bots, webhooks, and system messages are ignored or denied. Follow the [Discord administrator checklist](docs/discord-admin-checklist.md). The legacy `"http"` ingress accepts slash commands but does not ingest owner thread messages; use Gateway mode for conversations. HTTP mode must follow the shared [public endpoint hardening runbook](docs/public-endpoint-hardening.md).
+
 ## Verification
 
 ```powershell
@@ -97,13 +114,13 @@ Install both wrappers first so Windows creates their virtual service identities.
 .\service\AgentRunner.exe install
 ```
 
-Then run `scripts\Set-AgentRunnerSecrets.ps1` from an elevated PowerShell prompt. It writes independently encrypted and ACLed bundles: the gateway bundle contains Slack credentials and the OpenCode client password; the worker bundle contains only the OpenCode server password and explicitly named provider credentials. For example:
+Then run `scripts\Set-AgentRunnerSecrets.ps1` from an elevated PowerShell prompt. It writes independently encrypted and ACLed bundles: the gateway bundle contains enabled integration credentials and the OpenCode client password; the worker bundle contains only the OpenCode server password and explicitly named provider credentials. For example:
 
 ```powershell
 .\scripts\Set-AgentRunnerSecrets.ps1 -WorkerSecretNames ANTHROPIC_API_KEY
 ```
 
-For Events API mode, provision the gateway bundle with `-SlackIngress events-api`; this stores `SLACK_SIGNING_SECRET` instead of `SLACK_APP_TOKEN`.
+For Events API mode, provision the gateway bundle with `-SlackIngress events-api`; this stores `SLACK_SIGNING_SECRET` instead of `SLACK_APP_TOKEN`. Add `-EnableDiscord` to store the Discord bot token. A Discord-only Gateway deployment may use `-SlackIngress disabled -EnableDiscord`. Legacy Discord HTTP ingress additionally requires `-DiscordIngress http` so the application public key is stored.
 
 Write the absolute `node.exe` location into `%ProgramData%\AgentRunner\node-path.txt` and the absolute `opencode.exe` location into `%ProgramData%\OpenCodeWorker\opencode-path.txt`. Grant both virtual identities read/execute access to this runner project so they can load their wrapper scripts. Grant `NT SERVICE\AgentRunner` the source-repository access needed to create Git worktrees, and grant `NT SERVICE\OpenCodeServer` only the configured repository/worktree and `.git/worktrees` access needed by agent execution. Then start both wrappers:
 
@@ -116,4 +133,4 @@ Before service installation, use an interactive development run to validate Open
 
 ## Security boundary
 
-Git worktrees prevent two Slack threads from editing the same checkout, but they are not an OS sandbox. The gateway and worker now run under different virtual service identities: Slack secrets never enter the OpenCode bundle or its process environment, and gateway-spawned Git commands receive a secret-free allowlisted environment. The worker still has its provider credential and can access resources granted to `NT SERVICE\OpenCodeServer`. Before expanding beyond trusted testers, move execution into a VM or comparably hardened worker sandbox with network policy. See [the security notes](docs/security.md) and [security review](docs/security-review.md).
+Git worktrees prevent concurrent integration sessions from editing the same checkout, but they are not an OS sandbox. The gateway and worker run under different virtual service identities: Slack and Discord credentials never enter the OpenCode bundle or process environment, and gateway-spawned Git commands receive a secret-free allowlisted environment. The worker still has its provider credential and can access resources granted to `NT SERVICE\OpenCodeServer`. Before expanding beyond trusted testers, move execution into a VM or comparably hardened worker sandbox with network policy. See [the security notes](docs/security.md) and [security review](docs/security-review.md).

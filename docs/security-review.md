@@ -1,12 +1,12 @@
-# Slack app security review packet
+# Slack and Discord coding-agent security review packet
 
 ## Executive summary
 
-**Company Coding Agent** is a single-workspace, internal Slack app that accepts direct messages from explicitly approved users and submits coding tasks to a company-managed OpenCode worker. It uses Slack Socket Mode, so the deployment has no public inbound HTTP endpoint.
+**Company Coding Agent** accepts allowlisted Slack direct messages and Discord agent-thread conversations and submits coding tasks to a company-managed OpenCode worker. The preferred Slack Socket Mode and Discord Gateway transports are outbound connections with no public inbound HTTP endpoint; optional Slack Events API and legacy Discord HTTP modes use the separately reviewed edge controls below.
 
-The Slack gateway and coding worker are separate Windows security principals. Slack credentials exist only in the gateway bundle and process. The OpenCode worker receives only its localhost server password and the separately approved model-provider credential. A deploy-time validation script verifies this separation without printing secret values.
+The integration gateway and coding worker are separate Windows security principals. Enabled Slack and Discord credentials exist only in the gateway bundle and process. The OpenCode worker receives only its localhost server password and the separately approved model-provider credential. A deploy-time validation script verifies this separation without printing secret values.
 
-The requested approval scope is one workspace, one named tester, and one disposable or backed-up repository.
+The requested approval scope is one Slack workspace and/or Discord guild, one named tester, and one disposable or backed-up repository.
 
 ## Events API deployment delta
 
@@ -17,6 +17,14 @@ In Events API mode, a managed TLS endpoint or hardened reverse proxy is the only
 The reviewed M2-D deployment is the version-controlled NGINX configuration in [`deploy/nginx/slack-edge.conf`](../deploy/nginx/slack-edge.conf), with the runbook and evidence procedure in [`public-endpoint-hardening.md`](public-endpoint-hardening.md). Application configuration permits only a loopback Bolt bind. NGINX buffers at most 256 KiB, constrains headers/connections/time, rate-limits both per source and globally, and logs no headers, query strings, or bodies. Receiver rejection logs are content-free and bounded. Production approval remains conditional on archived TLS, firewall/reachability, time-sync, and log-search evidence from the deployed host.
 
 Bolt verifies the unmodified request body, signature, and timestamp before dispatch. The adapter then validates the exact app ID, workspace, user, direct-message context, event type, and bot/subtype rules. Authorized messages are committed to a namespaced SQLite inbox before HTTP 200 is released. Attachment retrieval, job creation, and Slack delivery happen asynchronously; pending or interrupted inbox events recover after restart, and existing event/job keys make Slack retries idempotent. Invalid, stale, malformed, wrong-app, and unauthorized requests create no job.
+
+## Discord Gateway deployment delta
+
+Discord is a guild-installed `/agent` application using an outbound authenticated Gateway connection. The command is registered only in configured guilds and accepted only from an exact allowlisted user in a normal guild channel. It creates a bot-owned public thread; ordinary messages from that same owner in the registered thread become follow-up jobs in one OpenCode session and worktree. DMs, unrelated threads, different users, bots, webhooks, and system messages are ignored or denied.
+
+The runner requests only Guilds, Guild Messages, and the privileged Message Content intent. There is no public Discord listener in Gateway mode. Interaction and message IDs are integration-namespaced idempotency keys. A small `discord_threads` registry binds each created thread to its guild, parent channel, and owner before job submission, so arbitrary guild threads cannot become execution sessions.
+
+Authorized commands and owner messages are reduced to source event, guild, thread, actor, prompt, and an optional validated Discord CDN image reference. The short-lived interaction token is used only for the immediate ephemeral acknowledgement and is never written to SQLite, audit, or logs. Sanitized envelopes are committed to the durable inbox before asynchronous job submission. Bot-owned messages report progress and final redacted output. Full administrator and acceptance steps are in [`discord-admin-checklist.md`](discord-admin-checklist.md).
 
 ## Data flow
 
@@ -30,7 +38,18 @@ Allowlisted Slack DM (text and optional image attachments)
   -> redacted and bounded response to the originating Slack DM thread
 ```
 
-No Slack credential crosses the localhost worker boundary. Gateway Git subprocesses receive an explicit allowlist of non-secret environment variables.
+No Slack or Discord credential crosses the localhost worker boundary. Gateway Git subprocesses receive an explicit allowlist of non-secret environment variables.
+
+```text
+Allowlisted Discord guild /agent command (required prompt, optional image)
+  -> outbound authenticated Discord Gateway connection
+  -> bot-owned public thread -> sanitized durable inbox -> integration-aware AgentRunner
+  -> owner messages in that registered thread reuse the session/worktree
+  -> authenticated 127.0.0.1 OpenCode API -> approved model provider
+  -> redacted and bounded public bot message in the originating channel/thread
+```
+
+No Discord credential or interaction token crosses the localhost worker boundary.
 
 ## Slack permissions
 
@@ -66,6 +85,8 @@ The version-controlled scope definition is [`slack/manifest.json`](../slack/mani
 | Slack bot token | `NT SERVICE\AgentRunner` | No |
 | Slack app-level token | `NT SERVICE\AgentRunner` | No |
 | Slack signing secret (Events API only) | `NT SERVICE\AgentRunner` | No |
+| Discord bot token | `NT SERVICE\AgentRunner` | No |
+| Discord application public key (legacy HTTP ingress only) | `NT SERVICE\AgentRunner` | No |
 | OpenCode client/server password | Both, in separate bundles | Yes, by design |
 | Model-provider credential | `NT SERVICE\OpenCodeServer` | Yes, accepted MVP risk |
 
@@ -73,7 +94,7 @@ Evidence:
 
 - [`Set-AgentRunnerSecrets.ps1`](../scripts/Set-AgentRunnerSecrets.ps1) creates independently encrypted, ACLed bundles.
 - [`Start-AgentRunner.ps1`](../scripts/Start-AgentRunner.ps1) reads only `gateway-secrets.bin`.
-- [`Start-OpenCode.ps1`](../scripts/Start-OpenCode.ps1) reads only `worker-secrets.bin` and refuses `SLACK_*` entries.
+- [`Start-OpenCode.ps1`](../scripts/Start-OpenCode.ps1) reads only `worker-secrets.bin` and refuses `SLACK_*` and `DISCORD_*` entries.
 - [`environment.ts`](../src/environment.ts) prevents gateway secrets from reaching Git child processes.
 - WinSW definitions use distinct Windows virtual accounts.
 
@@ -92,9 +113,9 @@ Evidence:
 - OpenCode accepts only an HTTP loopback literal; remote hosts, URL credentials, paths, queries, fragments, and redirects are rejected.
 - HTTP Basic authentication uses a high-entropy password shared only between the two service bundles.
 - Runtime-inline OpenCode configuration disables auto-update, external-directory access, web tools, subagents, skills, and interactive questions. Unknown tools require approval and the coordinator rejects permission requests.
-- A detached worktree is used per Slack thread, with per-thread serialization.
+- A detached worktree is used per normalized Slack/Discord session, with per-session serialization.
 - Global/per-user concurrency, queue, timeout, output, and reported-cost limits are enforced.
-- Slack delivery failure cannot change a successful execution result or trigger an automatic replay.
+- Integration delivery failure cannot change a successful execution result or trigger an automatic replay.
 
 ## Deployment verification evidence
 
@@ -117,7 +138,7 @@ Archive the output with the approval ticket. The validation script checks servic
 3. Native Windows service isolation is weaker than a dedicated VM. Testing is restricted to one trusted user and a disposable/backed-up repository until a VM worker is deployed.
 4. The worker intentionally has shell/edit capability. Repository scripts and dependencies are executable content.
 5. Source and prompts are transmitted to the separately approved model provider.
-6. Slack token rotation is manual for this single-workspace MVP. The incident owner can revoke both Slack tokens immediately.
+6. Slack and Discord token rotation is manual for the MVP. The incident owner can revoke enabled platform tokens immediately.
 
 ## Approval requested
 

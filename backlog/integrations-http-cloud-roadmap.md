@@ -9,7 +9,7 @@ The work is intentionally phased. Do not combine the initial HTTPS milestone wit
 Treat these as independent axes:
 
 1. **Platform integration:** Slack, Discord, or a future platform.
-2. **Ingress transport:** Slack Socket Mode, Slack Events API over HTTPS, or Discord interactions over HTTPS.
+2. **Ingress transport:** Slack Socket Mode, Slack Events API over HTTPS, Discord Gateway, or Discord interactions over HTTPS.
 3. **Runtime:** local Windows service, a single cloud host/task, or eventually distributed cloud services.
 
 “Webhook” is not an integration type. For Slack, inbound user messages arrive through the **Events API**; Slack incoming webhooks are outbound-only and are not a replacement for the bot-token Web API. Socket Mode remains a supported deployment option rather than being treated as test-only.
@@ -317,23 +317,29 @@ Do this before replacing SQLite or distributing workers. The goal is to move the
 - Slack and provider secrets remain separated.
 - The deployment has no unsupported multi-writer SQLite topology.
 
-## Milestone 4 — Discord HTTPS interactions
+## Milestone 4 — Discord Gateway conversations
 
-Depends on Milestones 1 and 2 proving the integration boundary. Start with slash commands/interactions. Discord arbitrary channel-message intake generally requires the Discord Gateway WebSocket and is a separate future transport.
+The first HTTPS-only slash-command implementation proved the integration boundary. The selected product flow now uses the Discord Gateway: `/agent` in a normal channel creates an owned public thread, and ordinary owner messages in that registered thread continue the same session.
 
-- [ ] Define the product interaction: slash command shape, allowed guilds/users, thread/session behavior, attachments, and response visibility.
-- [ ] Verify Discord interaction signatures before normalization.
-- [ ] Defer/acknowledge interactions within Discord's deadline.
-- [ ] Normalize application/guild, channel, thread, and actor identities.
-- [ ] Namespace Discord event and session keys.
-- [ ] Implement Discord-specific delivery and output limits.
-- [ ] Handle interaction-token lifetime explicitly; long-running jobs may require follow-up messages through bot credentials rather than the original callback token.
-- [ ] Add Discord allowlist, replay, duplicate, authorization, and delivery tests.
-- [ ] Confirm Slack and Discord jobs can coexist without identity, session, or reporter collisions.
+- [x] Define the product interaction: slash command shape, allowed guilds/users, thread/session behavior, attachments, and response visibility.
+- [x] Verify Discord interaction signatures before normalization.
+- [x] Defer/acknowledge interactions within Discord's deadline.
+- [x] Normalize application/guild, channel, thread, and actor identities.
+- [x] Namespace Discord event and session keys.
+- [x] Implement Discord-specific delivery and output limits.
+- [x] Handle interaction-token lifetime explicitly; long-running jobs may require follow-up messages through bot credentials rather than the original callback token.
+- [x] Add Discord allowlist, replay, duplicate, authorization, and delivery tests.
+- [x] Confirm Slack and Discord jobs can coexist without identity, session, or reporter collisions.
+- [x] Add outbound Gateway lifecycle handling with Guilds, Guild Messages, and Message Content intents.
+- [x] Create and persist one owned public thread for each top-level `/agent` command.
+- [x] Normalize and durably deduplicate owner follow-up messages by Discord message ID.
+
+M4 uses a guild-scoped `/agent` command with a required prompt and one optional image. The Gateway receives both interactions and thread messages over an outbound connection, so no public Discord endpoint is needed. A top-level command creates a bot-owned thread registered to the initiating user; the initial command and later owner messages use that thread ID as the shared OpenCode session/worktree boundary. Interaction tokens are used only for immediate acknowledgement and are never persisted. Bot-owned progress and final messages are redacted and bounded.
 
 **Milestone 4 exit criteria**
 
-- One allowlisted slash-command flow completes end-to-end over HTTPS.
+- One allowlisted slash-command flow creates a thread and completes end-to-end over the Gateway.
+- Two ordinary owner follow-ups reuse the same session/worktree, while another user and an unrelated thread create no job.
 - Discord support introduces no Discord branches inside the core execution loop.
 - Documentation does not claim support for arbitrary Discord messages unless a Gateway transport is implemented.
 
@@ -384,12 +390,12 @@ The integrator must run `npm run check`, `npm test`, and `npm run build` after c
 
 - Normalized identity columns remain additive for one compatibility milestone; normalized columns and integration-namespaced keys are authoritative for new reads and writes.
 - Slack Events API acknowledgement is released only after an authorized event is committed to the SQLite inbound inbox. The receiver does not wait for attachment downloads, job submission, OpenCode, or Slack API calls. Inbox recovery plus idempotent job submission provides durable at-least-once internal processing without claiming exactly-once external delivery.
+- Persisted delivery state is a generic delivery-message ID with an additive backfill from Slack's legacy `reply_ts`; platform reporters interpret the ID. Discord interaction tokens are not persisted.
+- Discord M4 uses Gateway ingress. `/agent` is top-level only, creates a public owner-bound thread, and ordinary owner messages in that thread continue the session.
 
 ## Decisions intentionally deferred
 
-- Whether persisted reply context is typed platform columns or a versioned, validated JSON envelope.
 - The exact AWS compute choice between EC2 and ECS-on-EC2.
-- Discord slash-command syntax and whether a later Discord Gateway transport is needed.
 - Shared-database and queue technology for distributed execution.
 
 Resolve these at the start of the milestone that needs them; do not block Slack transport separation on later cloud or Discord choices.
