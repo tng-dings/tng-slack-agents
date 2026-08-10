@@ -3,6 +3,8 @@ import { access } from "node:fs/promises";
 import { promisify } from "node:util";
 import { loadConfig, loadSecrets } from "../config.js";
 import { unprivilegedChildEnvironment } from "../environment.js";
+import { parseHealth } from "../opencode-protocol.js";
+import { assertApprovedOpenCodeVersion } from "../opencode-version.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -32,9 +34,9 @@ async function main(): Promise<void> {
         signal: AbortSignal.timeout(5_000),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const health = (await response.json()) as { healthy?: boolean; version?: string };
-      if (!health.healthy) throw new Error("server reported unhealthy");
-      return health.version ?? "healthy";
+      const health = parseHealth(await response.json());
+      assertApprovedOpenCodeVersion(health.version, config.openCode.approvedVersions);
+      return health.version;
     },
   });
   if (config.slack.enabled) {

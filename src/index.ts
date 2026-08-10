@@ -53,11 +53,8 @@ async function main(): Promise<void> {
 
   try {
     const health = await executor.health();
-    console.log(`OpenCode ${health.version ?? "unknown"} is healthy.`);
-  } catch (error) {
-    console.warn("OpenCode is not reachable yet; queued jobs will fail until it is available.", error);
-  }
-  try {
+    await audit.log("opencode_version_approved", { version: health.version, approval: "exact_allowlist" });
+    console.log(`OpenCode ${health.version} is healthy and approved.`);
     await runner.start();
     if (slack) {
       await slack.start();

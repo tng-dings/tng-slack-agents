@@ -45,6 +45,7 @@
   "openCode": {
     "baseUrl": "http://127.0.0.1:4096",
     "username": "opencode",
+    "approvedVersions": ["REPLACE_WITH_VALIDATED_OPENCODE_VERSION"],
     "workingRepository": "C:\\source\\your-repository"
   },
   "limits": {

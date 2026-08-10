@@ -1,4 +1,5 @@
 import { IntegrationAuthorizationPolicy, type RunnerConfig } from "../src/config.js";
+import type { Executor } from "../src/types.js";
 
 export function testConfig(root: string): RunnerConfig {
   return {
@@ -51,6 +52,7 @@ export function testConfig(root: string): RunnerConfig {
       baseUrl: "http://127.0.0.1:1",
       username: "opencode",
       workingRepository: root,
+      approvedVersions: ["test"],
     },
     limits: {
       maxConcurrentJobsPerUser: 1,
@@ -86,4 +88,23 @@ export async function waitFor(check: () => boolean, timeoutMs = 2_000): Promise<
 
 export function testAuthorizationPolicy(config: RunnerConfig): IntegrationAuthorizationPolicy {
   return new IntegrationAuthorizationPolicy(config.integrations);
+}
+
+export function testExecutor(
+  workingDirectory: string,
+  executeTurn: Executor["executeTurn"],
+  providerSessionId = "test-provider-session",
+): Executor {
+  return {
+    prepareSession: async (_job, session, callbacks) => {
+      const directory = session.workingDirectory ?? workingDirectory;
+      await callbacks.onWorkingDirectory(directory);
+      return {
+        providerId: session.providerId,
+        providerSessionId: session.providerSessionId ?? providerSessionId,
+        workingDirectory: directory,
+      };
+    },
+    executeTurn,
+  };
 }

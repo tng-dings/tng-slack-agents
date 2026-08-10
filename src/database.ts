@@ -70,8 +70,11 @@ function mapSession(row: Row): SessionRecord {
     tenantId: String(row.tenant_id),
     conversationId: String(row.conversation_id),
     threadId: String(row.thread_id),
-    openCodeSessionId: row.opencode_session_id === null ? null : String(row.opencode_session_id),
+    providerId: String(row.provider_id),
+    providerSessionId: row.provider_session_id === null ? null : String(row.provider_session_id),
     workingDirectory: row.working_directory === null ? null : String(row.working_directory),
+    executionGeneration: Number(row.execution_generation),
+    reconciliationRequired: Number(row.reconciliation_required) === 1,
     createdAt: String(row.created_at),
     updatedAt: String(row.updated_at),
   };
@@ -134,7 +137,11 @@ export class RunnerDatabase {
         channel_id TEXT NOT NULL,
         thread_ts TEXT NOT NULL,
         opencode_session_id TEXT,
+        provider_id TEXT NOT NULL DEFAULT 'opencode',
+        provider_session_id TEXT,
         working_directory TEXT,
+        execution_generation INTEGER NOT NULL DEFAULT 0,
+        reconciliation_required INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
@@ -265,6 +272,25 @@ export class RunnerDatabase {
     }
     this.sqlite.exec("CREATE INDEX IF NOT EXISTS jobs_actor_status_idx ON jobs(actor_id, status)");
 
+    const sessionColumns = this.sqlite.prepare("PRAGMA table_info(sessions)").all() as Row[];
+    if (!sessionColumns.some((col) => String(col.name) === "execution_generation")) {
+      this.sqlite.exec("ALTER TABLE sessions ADD COLUMN execution_generation INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!sessionColumns.some((col) => String(col.name) === "reconciliation_required")) {
+      this.sqlite.exec("ALTER TABLE sessions ADD COLUMN reconciliation_required INTEGER NOT NULL DEFAULT 0");
+    }
+    if (!sessionColumns.some((col) => String(col.name) === "provider_id")) {
+      this.sqlite.exec("ALTER TABLE sessions ADD COLUMN provider_id TEXT NOT NULL DEFAULT 'opencode'");
+    }
+    if (!sessionColumns.some((col) => String(col.name) === "provider_session_id")) {
+      this.sqlite.exec("ALTER TABLE sessions ADD COLUMN provider_session_id TEXT");
+    }
+    this.sqlite.exec(`
+      UPDATE sessions SET provider_id = 'opencode' WHERE provider_id = '' OR provider_id IS NULL;
+      UPDATE sessions SET provider_session_id = opencode_session_id
+      WHERE provider_session_id IS NULL AND opencode_session_id IS NOT NULL;
+    `);
+
     // Existing daily_usage rows predate integration-aware budget tracking.
     // Recreate the table with integration and tenant columns, backfilling all
     // legacy rows as Slack records (the only integration that existed before).
@@ -335,10 +361,12 @@ export class RunnerDatabase {
     return row ? mapSession(row) : undefined;
   }
 
-  updateSessionExecution(sessionKey: string, openCodeSessionId: string, workingDirectory: string): void {
+  updateSessionExecution(sessionKey: string, providerId: string, providerSessionId: string, workingDirectory: string): void {
     this.sqlite.prepare(`
-      UPDATE sessions SET opencode_session_id = ?, working_directory = ?, updated_at = ? WHERE session_key = ?
-    `).run(openCodeSessionId, workingDirectory, now(), sessionKey);
+      UPDATE sessions SET provider_id = ?, provider_session_id = ?,
+        opencode_session_id = CASE WHEN ? = 'opencode' THEN ? ELSE opencode_session_id END,
+        working_directory = ?, updated_at = ? WHERE session_key = ?
+    `).run(providerId, providerSessionId, providerId, providerSessionId, workingDirectory, now(), sessionKey);
   }
 
   updateJobDeliveryMessageId(id: string, deliveryMessageId: string): void {
@@ -348,6 +376,49 @@ export class RunnerDatabase {
         reply_ts = CASE WHEN integration = 'slack' THEN ? ELSE reply_ts END
       WHERE id = ?
     `).run(deliveryMessageId, deliveryMessageId, id);
+  }
+
+  updateSessionWorkingDirectory(sessionKey: string, workingDirectory: string): void {
+    this.sqlite.prepare(`
+      UPDATE sessions SET working_directory = ?, updated_at = ? WHERE session_key = ?
+    `).run(workingDirectory, now(), sessionKey);
+  }
+
+  updateSessionProviderSession(sessionKey: string, providerId: string, providerSessionId: string): void {
+    this.sqlite.prepare(`
+      UPDATE sessions SET provider_id = ?, provider_session_id = ?,
+        opencode_session_id = CASE WHEN ? = 'opencode' THEN ? ELSE opencode_session_id END,
+        updated_at = ? WHERE session_key = ?
+    `).run(providerId, providerSessionId, providerId, providerSessionId, now(), sessionKey);
+  }
+
+  quarantineSessionExecution(sessionKey: string): void {
+    this.sqlite.prepare(`
+      UPDATE sessions SET provider_session_id = NULL,
+        opencode_session_id = CASE WHEN provider_id = 'opencode' THEN NULL ELSE opencode_session_id END,
+        execution_generation = execution_generation + 1,
+        reconciliation_required = 0, updated_at = ?
+      WHERE session_key = ?
+    `).run(now(), sessionKey);
+  }
+
+  completeSessionReconciliation(sessionKey: string): void {
+    this.sqlite.prepare(`
+      UPDATE sessions SET reconciliation_required = 0, updated_at = ? WHERE session_key = ?
+    `).run(now(), sessionKey);
+  }
+
+  requireSessionReconciliation(sessionKey: string): void {
+    this.sqlite.prepare(`
+      UPDATE sessions SET reconciliation_required = 1, updated_at = ? WHERE session_key = ?
+    `).run(now(), sessionKey);
+  }
+
+  sessionsRequiringReconciliation(): SessionRecord[] {
+    const rows = this.sqlite.prepare(`
+      SELECT * FROM sessions WHERE reconciliation_required = 1 ORDER BY session_key
+    `).all() as Row[];
+    return rows.map(mapSession);
   }
 
   insertInboundEvent(
@@ -511,6 +582,10 @@ export class RunnerDatabase {
       const row = this.sqlite.prepare(`
         SELECT j.* FROM jobs j
         WHERE j.status = 'queued'
+          AND NOT EXISTS (
+            SELECT 1 FROM sessions s
+            WHERE s.session_key = j.session_key AND s.reconciliation_required = 1
+          )
           AND (SELECT COUNT(*) FROM jobs r WHERE r.status = 'running' AND r.integration = j.integration AND r.tenant_id = j.tenant_id AND r.actor_id = j.actor_id) < ?
           AND NOT EXISTS (
             SELECT 1 FROM jobs r WHERE r.status = 'running' AND r.session_key = j.session_key
@@ -605,17 +680,24 @@ export class RunnerDatabase {
   }
 
   recoverInterruptedJobs(retainContent = true): JobRecord[] {
-    const rows = this.sqlite.prepare("SELECT * FROM jobs WHERE status = 'running'").all() as Row[];
-    if (rows.length) {
-      this.sqlite.prepare(`
-        UPDATE jobs SET status = 'failed', prompt = CASE WHEN ? THEN prompt ELSE '' END,
-          attachments = CASE WHEN ? THEN attachments ELSE NULL END,
-          output = CASE WHEN ? THEN output ELSE '' END,
-          error = 'Runner restarted while this job was executing', finished_at = ?
-        WHERE status = 'running'
-      `).run(retainContent ? 1 : 0, retainContent ? 1 : 0, retainContent ? 1 : 0, now());
-    }
-    return rows.map(mapJob);
+    return this.transaction(() => {
+      const rows = this.sqlite.prepare("SELECT * FROM jobs WHERE status = 'running'").all() as Row[];
+      if (rows.length) {
+        const timestamp = now();
+        this.sqlite.prepare(`
+          UPDATE sessions SET reconciliation_required = 1, updated_at = ?
+          WHERE session_key IN (SELECT session_key FROM jobs WHERE status = 'running')
+        `).run(timestamp);
+        this.sqlite.prepare(`
+          UPDATE jobs SET status = 'failed', prompt = CASE WHEN ? THEN prompt ELSE '' END,
+            attachments = CASE WHEN ? THEN attachments ELSE NULL END,
+            output = CASE WHEN ? THEN output ELSE '' END,
+            error = 'Runner restarted while this job was executing', finished_at = ?
+          WHERE status = 'running'
+        `).run(retainContent ? 1 : 0, retainContent ? 1 : 0, retainContent ? 1 : 0, timestamp);
+      }
+      return rows.map(mapJob);
+    });
   }
 
   insertAudit(event: {

@@ -11,7 +11,7 @@ import { AuthorizationError } from "../src/errors.js";
 import { AgentRunner } from "../src/runner.js";
 import { SlackJobReporter } from "../src/slack.js";
 import type { Attachment, Executor, JobRecord, JobReporter } from "../src/types.js";
-import { testAuthorizationPolicy, testConfig, waitFor } from "./helpers.js";
+import { testAuthorizationPolicy, testConfig, testExecutor, waitFor } from "./helpers.js";
 
 test("runner persists jobs and sessions, enforces authz, accounts usage, and redacts audits", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-control-"));
@@ -33,19 +33,15 @@ test("runner persists jobs and sessions, enforces authz, accounts usage, and red
       reports.set(jobId, report);
     },
   });
-  const executor: Executor = {
-    execute: async (_job, _session, callbacks) => {
+  const executor: Executor = testExecutor(`${root}/worktree`, async (_job, _session, callbacks) => {
       await callbacks.onTool({ tool: "shell", output: "password=super-secret" });
       await callbacks.onText("done");
       await callbacks.onUsage({ cost: 0.4, inputTokens: 10, outputTokens: 2 });
       return {
         output: "done",
         usage: { cost: 0.4, inputTokens: 10, outputTokens: 2 },
-        openCodeSessionId: "oc-session",
-        workingDirectory: `${root}/worktree`,
       };
-    },
-  };
+    }, "oc-session");
   const runner = new AgentRunner(config, testAuthorizationPolicy(config), database, executor, audit, (job) => reporterFactory(job.id));
   await runner.start();
   const submission = {
@@ -68,7 +64,7 @@ test("runner persists jobs and sessions, enforces authz, accounts usage, and red
   await waitFor(() => database.getJob(job.id)?.status === "succeeded");
 
   assert.equal(database.getJob(job.id)?.output, "done");
-  assert.equal(database.getSession(job.sessionKey)?.openCodeSessionId, "oc-session");
+  assert.equal(database.getSession(job.sessionKey)?.providerSessionId, "oc-session");
   assert.deepEqual(database.dailyUsage("slack", "T1", "U_ALLOWED"), { cost: 0.4, inputTokens: 10, outputTokens: 2 });
   assert.equal(reports.get(job.id)?.output, "done");
   await assert.rejects(
@@ -87,7 +83,7 @@ test("runner persists jobs and sessions, enforces authz, accounts usage, and red
   assert(auditText.includes('"inputTokens":10'));
   const reopened = new RunnerDatabase(config.storage.databasePath);
   assert.equal(reopened.getJob(job.id)?.status, "succeeded");
-  assert.equal(reopened.getSession(job.sessionKey)?.openCodeSessionId, "oc-session");
+  assert.equal(reopened.getSession(job.sessionKey)?.providerSessionId, "oc-session");
   reopened.close();
   await rm(root, { recursive: true, force: true });
 });
@@ -116,7 +112,7 @@ test("runner marks an in-flight job failed after restart instead of replaying it
     config,
     testAuthorizationPolicy(config),
     reopened,
-    { execute: async () => Promise.reject(new Error("must not execute")) },
+    testExecutor(root, async () => Promise.reject(new Error("must not execute"))),
     audit,
     () => ({
       start: async () => undefined,
@@ -135,6 +131,238 @@ test("runner marks an in-flight job failed after restart instead of replaying it
   await rm(root, { recursive: true, force: true });
 });
 
+test("graceful shutdown aborts active job controllers and waits for settlement", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-shutdown-"));
+  const config = testConfig(root);
+  config.limits.jobTimeoutSeconds = 60;
+  const database = new RunnerDatabase(config.storage.databasePath);
+  const audit = new AuditLogger(config.storage.auditLogPath, database);
+  let executionStarted = false;
+  let abortReason: unknown;
+  const executor: Executor = {
+    prepareSession: async (job, session, callbacks) => {
+      const workingDirectory = session.workingDirectory ?? path.join(root, "worktree");
+      await callbacks.onWorkingDirectory(workingDirectory);
+      return { providerId: session.providerId, providerSessionId: session.providerSessionId ?? `session-${job.id}`, workingDirectory };
+    },
+    executeTurn: async (_job, _session, _callbacks, signal) => {
+      executionStarted = true;
+      return new Promise((resolve, reject) => {
+        const onAbort = () => {
+          abortReason = signal.reason;
+          reject(signal.reason);
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+      });
+    },
+  };
+  const runner = new AgentRunner(config, testAuthorizationPolicy(config), database, executor, audit, () => ({
+    start: async () => undefined,
+    append: async () => undefined,
+    succeed: async () => undefined,
+    fail: async () => undefined,
+  }));
+  await runner.start();
+  const { job } = await runner.submit({
+    integration: "slack",
+    sourceEventId: "shutdown-event",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "shutdown-thread",
+    actorId: "U_ALLOWED",
+    prompt: "wait",
+  });
+  await waitFor(() => executionStarted);
+  const startedAt = Date.now();
+  await runner.stop();
+  assert(Date.now() - startedAt < 2_000);
+  assert(abortReason instanceof Error);
+  assert.equal((abortReason as { code?: string }).code, "RUNNER_SHUTDOWN");
+  assert.equal(database.getJob(job.id)?.status, "failed");
+  database.close();
+  await rm(root, { recursive: true, force: true });
+});
+
+test("startup reconciliation blocks a session until abort confirms it stopped", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-reconcile-stopped-"));
+  const config = testConfig(root);
+  const database = new RunnerDatabase(config.storage.databasePath);
+  const running = database.insertJob("interrupted-job", {
+    integration: "slack",
+    sourceEventId: "interrupted-event",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "reconcile-thread",
+    actorId: "U_ALLOWED",
+    prompt: "interrupted",
+  });
+  database.updateSessionExecution(running.sessionKey, "opencode", "old-provider-session", path.join(root, "worktree"));
+  assert.equal(database.claimNextJob(1, 1)?.id, running.id);
+  const queued = database.insertJob("queued-after-interruption", {
+    integration: "slack",
+    sourceEventId: "queued-event",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "reconcile-thread",
+    actorId: "U_ALLOWED",
+    prompt: "next",
+  });
+  database.close();
+
+  const reopened = new RunnerDatabase(config.storage.databasePath);
+  const audit = new AuditLogger(config.storage.auditLogPath, reopened);
+  let reconciliationStarted!: () => void;
+  const started = new Promise<void>((resolve) => { reconciliationStarted = resolve; });
+  let releaseReconciliation!: () => void;
+  const gate = new Promise<void>((resolve) => { releaseReconciliation = resolve; });
+  let turnStarted = false;
+  const executor: Executor = {
+    reconcileSession: async (session) => {
+      assert.equal(session.providerSessionId, "old-provider-session");
+      reconciliationStarted();
+      await gate;
+    },
+    prepareSession: async (_job, session, callbacks) => {
+      assert.equal(session.providerSessionId, "old-provider-session");
+      await callbacks.onWorkingDirectory(session.workingDirectory!);
+      return { providerId: session.providerId, providerSessionId: session.providerSessionId!, workingDirectory: session.workingDirectory! };
+    },
+    executeTurn: async () => {
+      turnStarted = true;
+      return { output: "continued", usage: { cost: 0, inputTokens: 1, outputTokens: 1 } };
+    },
+  };
+  const runner = new AgentRunner(config, testAuthorizationPolicy(config), reopened, executor, audit, () => ({
+    start: async () => undefined,
+    append: async () => undefined,
+    succeed: async () => undefined,
+    fail: async () => undefined,
+  }));
+  const starting = runner.start();
+  await started;
+  assert.equal(reopened.getJob(running.id)?.status, "failed");
+  assert.equal(reopened.getJob(queued.id)?.status, "queued");
+  assert.equal(reopened.getSession(running.sessionKey)?.reconciliationRequired, true);
+  assert.equal(turnStarted, false);
+  releaseReconciliation();
+  await starting;
+  await waitFor(() => reopened.getJob(queued.id)?.status === "succeeded");
+  assert.equal(turnStarted, true);
+  assert.equal(reopened.getSession(running.sessionKey)?.providerSessionId, "old-provider-session");
+  assert.equal(reopened.getSession(running.sessionKey)?.reconciliationRequired, false);
+  await runner.stop();
+  reopened.close();
+  await rm(root, { recursive: true, force: true });
+});
+
+test("durable reconciliation state survives a second restart", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-reconcile-restart-"));
+  const config = testConfig(root);
+  const database = new RunnerDatabase(config.storage.databasePath);
+  const running = database.insertJob("twice-interrupted-job", {
+    integration: "slack",
+    sourceEventId: "twice-interrupted-event",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "twice-interrupted-thread",
+    actorId: "U_ALLOWED",
+    prompt: "interrupted",
+  });
+  database.updateSessionExecution(running.sessionKey, "opencode", "durable-provider-session", path.join(root, "worktree"));
+  assert.equal(database.claimNextJob(1, 1)?.id, running.id);
+  assert.equal(database.recoverInterruptedJobs().length, 1);
+  assert.equal(database.getSession(running.sessionKey)?.reconciliationRequired, true);
+  database.close();
+
+  const reopened = new RunnerDatabase(config.storage.databasePath);
+  const audit = new AuditLogger(config.storage.auditLogPath, reopened);
+  let reconciled = false;
+  const executor: Executor = {
+    reconcileSession: async (session) => {
+      reconciled = true;
+      assert.equal(session.providerSessionId, "durable-provider-session");
+    },
+    prepareSession: async () => Promise.reject(new Error("must not prepare")),
+    executeTurn: async () => Promise.reject(new Error("must not execute")),
+  };
+  const runner = new AgentRunner(config, testAuthorizationPolicy(config), reopened, executor, audit, () => ({
+    start: async () => undefined,
+    append: async () => undefined,
+    succeed: async () => undefined,
+    fail: async () => undefined,
+  }));
+  await runner.start();
+  assert.equal(reconciled, true);
+  assert.equal(reopened.getSession(running.sessionKey)?.reconciliationRequired, false);
+  await runner.stop();
+  reopened.close();
+  await rm(root, { recursive: true, force: true });
+});
+
+test("failed startup reconciliation quarantines the provider session before queued work", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-reconcile-quarantine-"));
+  const config = testConfig(root);
+  const database = new RunnerDatabase(config.storage.databasePath);
+  const running = database.insertJob("ambiguous-job", {
+    integration: "slack",
+    sourceEventId: "ambiguous-event",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "quarantine-thread",
+    actorId: "U_ALLOWED",
+    prompt: "ambiguous",
+  });
+  database.updateSessionExecution(running.sessionKey, "opencode", "ambiguous-provider-session", path.join(root, "worktree"));
+  assert.equal(database.claimNextJob(1, 1)?.id, running.id);
+  const queued = database.insertJob("queued-after-quarantine", {
+    integration: "slack",
+    sourceEventId: "replacement-event",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "quarantine-thread",
+    actorId: "U_ALLOWED",
+    prompt: "replacement",
+  });
+  database.close();
+
+  const reopened = new RunnerDatabase(config.storage.databasePath);
+  const audit = new AuditLogger(config.storage.auditLogPath, reopened);
+  let sawQuarantinedPreparation = false;
+  let providerPersistedBeforeTurn = false;
+  const executor: Executor = {
+    reconcileSession: async () => { throw new Error("abort endpoint unavailable"); },
+    prepareSession: async (_job, session, callbacks) => {
+      sawQuarantinedPreparation = session.providerSessionId === null && session.executionGeneration === 1;
+      await callbacks.onWorkingDirectory(session.workingDirectory!);
+      return { providerId: "opencode", providerSessionId: "replacement-provider-session", workingDirectory: session.workingDirectory! };
+    },
+    executeTurn: async (job) => {
+      providerPersistedBeforeTurn = reopened.getSession(job.sessionKey)?.providerSessionId === "replacement-provider-session";
+      return { output: "replacement complete", usage: { cost: 0, inputTokens: 1, outputTokens: 1 } };
+    },
+  };
+  const runner = new AgentRunner(config, testAuthorizationPolicy(config), reopened, executor, audit, () => ({
+    start: async () => undefined,
+    append: async () => undefined,
+    succeed: async () => undefined,
+    fail: async () => undefined,
+  }));
+  await runner.start();
+  await waitFor(() => reopened.getJob(queued.id)?.status === "succeeded");
+  assert.equal(sawQuarantinedPreparation, true);
+  assert.equal(providerPersistedBeforeTurn, true);
+  assert.equal(reopened.getSession(running.sessionKey)?.providerSessionId, "replacement-provider-session");
+  assert.equal(reopened.getSession(running.sessionKey)?.executionGeneration, 1);
+  assert.equal(reopened.getSession(running.sessionKey)?.reconciliationRequired, false);
+  await runner.stop();
+
+  const auditText = await readFile(config.storage.auditLogPath, "utf8");
+  assert.match(auditText, /"outcome":"quarantined"/);
+  reopened.close();
+  await rm(root, { recursive: true, force: true });
+});
+
 test("runner persists attachments and passes them to the executor", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-attachments-"));
   const config = testConfig(root);
@@ -142,14 +370,12 @@ test("runner persists attachments and passes them to the executor", async () => 
   const database = new RunnerDatabase(config.storage.databasePath);
   const audit = new AuditLogger(config.storage.auditLogPath, database, ["secret"]);
   let capturedAttachments: Attachment[] | undefined;
-  const executor: Executor = {
-    execute: async (job, _session, callbacks) => {
+  const executor: Executor = testExecutor(root, async (job, _session, callbacks) => {
       capturedAttachments = job.attachments;
       await callbacks.onText("done");
       await callbacks.onUsage({ cost: 0.1, inputTokens: 5, outputTokens: 1 });
-      return { output: "done", usage: { cost: 0.1, inputTokens: 5, outputTokens: 1 }, openCodeSessionId: "s1", workingDirectory: root };
-    },
-  };
+      return { output: "done", usage: { cost: 0.1, inputTokens: 5, outputTokens: 1 } };
+    }, "s1");
   const runner = new AgentRunner(config, testAuthorizationPolicy(config), database, executor, audit, () => ({
     start: async () => undefined,
     append: async () => undefined,
@@ -210,7 +436,7 @@ test("runner rejects jobs exceeding the attachment count limit", async () => {
   config.limits.maxAttachmentsPerJob = 1;
   const database = new RunnerDatabase(config.storage.databasePath);
   const audit = new AuditLogger(config.storage.auditLogPath, database);
-  const runner = new AgentRunner(config, testAuthorizationPolicy(config), database, { execute: async () => Promise.reject(new Error("must not execute")) }, audit, () => ({
+  const runner = new AgentRunner(config, testAuthorizationPolicy(config), database, testExecutor(root, async () => Promise.reject(new Error("must not execute"))), audit, () => ({
     start: async () => undefined,
     append: async () => undefined,
     succeed: async () => undefined,
@@ -336,7 +562,22 @@ test("database idempotently upgrades legacy Slack identity rows", async () => {
 
   const reopened = new RunnerDatabase(filename);
   assert.equal(reopened.getJobBySourceEvent("slack", "Ev1")?.id, "legacy-job");
-  assert.equal(reopened.getSession("slack:T1:D1:1.0")?.openCodeSessionId, "oc-1");
+  assert.equal(reopened.getSession("slack:T1:D1:1.0")?.providerId, "opencode");
+  assert.equal(reopened.getSession("slack:T1:D1:1.0")?.providerSessionId, "oc-1");
+  assert.equal(reopened.getSession("slack:T1:D1:1.0")?.executionGeneration, 0);
+  assert.equal(reopened.getSession("slack:T1:D1:1.0")?.reconciliationRequired, false);
+  const migratedColumns = reopened.sqlite.prepare("PRAGMA table_info(sessions)").all() as Array<{ name: string }>;
+  assert(migratedColumns.some((column) => column.name === "opencode_session_id"));
+  assert(migratedColumns.some((column) => column.name === "provider_id"));
+  assert(migratedColumns.some((column) => column.name === "provider_session_id"));
+  const migratedIds = reopened.sqlite.prepare(`
+    SELECT opencode_session_id, provider_id, provider_session_id FROM sessions WHERE session_key = ?
+  `).get("slack:T1:D1:1.0") as Record<string, unknown>;
+  assert.deepEqual({ ...migratedIds }, {
+    opencode_session_id: "oc-1",
+    provider_id: "opencode",
+    provider_session_id: "oc-1",
+  });
   reopened.close();
   await rm(root, { recursive: true, force: true });
 });
@@ -499,7 +740,7 @@ test("runner rejects submissions for an integration with no authorization policy
     config,
     testAuthorizationPolicy(config),
     database,
-    { execute: async () => Promise.reject(new Error("must not execute")) },
+    testExecutor(root, async () => Promise.reject(new Error("must not execute"))),
     audit,
     () => ({
       start: async () => undefined,
@@ -576,7 +817,7 @@ test("runner isolates per-principal limits across integrations", async () => {
     config,
     testAuthorizationPolicy(config),
     database,
-    { execute: async () => Promise.reject(new Error("must not execute")) },
+    testExecutor(root, async () => Promise.reject(new Error("must not execute"))),
     audit,
     () => ({
       start: async () => undefined,

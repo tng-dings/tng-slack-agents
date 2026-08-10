@@ -62,6 +62,7 @@ export interface RunnerConfig {
     baseUrl: string;
     username: string;
     workingRepository: string;
+    approvedVersions: string[];
     model?: { providerID: string; modelID: string };
   };
   limits: {
@@ -396,6 +397,7 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
       baseUrl: loopbackBaseUrl(openCode.baseUrl),
       username: typeof openCode.username === "string" ? openCode.username : "opencode",
       workingRepository: resolvePath(openCode.workingRepository, "openCode.workingRepository", baseDirectory),
+      approvedVersions: stringArray(openCode.approvedVersions ?? [], "openCode.approvedVersions"),
       ...(model ? { model } : {}),
     },
     limits: {

@@ -25,14 +25,14 @@ export class WorkspaceManager {
   ) {}
 
   async prepare(sessionKey: string, existingDirectory?: string | null): Promise<string> {
-    if (existingDirectory && (await exists(path.join(existingDirectory, ".git")))) {
-      return this.assertInsideRoot(await realpath(existingDirectory));
-    }
-
     const sourceRoot = (await execFileAsync("git", ["-C", this.sourceRepository, "rev-parse", "--show-toplevel"], gitOptions)).stdout.trim();
     await execFileAsync("git", ["-C", sourceRoot, "rev-parse", "--verify", "HEAD"], gitOptions);
     await mkdir(this.worktreeRoot, { recursive: true });
     const realRoot = await realpath(this.worktreeRoot);
+    if (existingDirectory && (await exists(path.join(existingDirectory, ".git")))) {
+      return this.assertManagedWorktree(sourceRoot, await this.assertInsideRoot(await realpath(existingDirectory)));
+    }
+
     const slug = createHash("sha256").update(sessionKey).digest("hex").slice(0, 20);
     const target = path.resolve(realRoot, slug);
     const relative = path.relative(realRoot, target);
@@ -42,11 +42,27 @@ export class WorkspaceManager {
 
     if (await exists(target)) {
       await this.assertInsideRoot(await realpath(target));
+      if (await exists(path.join(target, ".git"))) {
+        return this.assertManagedWorktree(sourceRoot, target);
+      }
       const entries = await readdir(target);
       if (entries.length > 0) throw new Error(`Worktree target already exists and is not a Git worktree: ${target}`);
     }
     await execFileAsync("git", ["-C", sourceRoot, "worktree", "add", "--detach", target, "HEAD"], gitOptions);
     return target;
+  }
+
+  private async assertManagedWorktree(sourceRoot: string, candidate: string): Promise<string> {
+    const targetRoot = (await execFileAsync("git", ["-C", candidate, "rev-parse", "--show-toplevel"], gitOptions)).stdout.trim();
+    const sourceCommon = path.resolve(sourceRoot, (await execFileAsync("git", ["-C", sourceRoot, "rev-parse", "--git-common-dir"], gitOptions)).stdout.trim());
+    const targetCommon = path.resolve(candidate, (await execFileAsync("git", ["-C", candidate, "rev-parse", "--git-common-dir"], gitOptions)).stdout.trim());
+    const samePath = (left: string, right: string) => process.platform === "win32"
+      ? left.toLowerCase() === right.toLowerCase()
+      : left === right;
+    if (!samePath(path.resolve(targetRoot), path.resolve(candidate)) || !samePath(sourceCommon, targetCommon)) {
+      throw new Error(`Worktree target is not owned by the configured source repository: ${candidate}`);
+    }
+    return candidate;
   }
 
   async cleanup(workingDirectory: string): Promise<void> {

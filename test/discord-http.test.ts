@@ -18,7 +18,7 @@ import {
 } from "../src/discord.js";
 import { AgentRunner } from "../src/runner.js";
 import type { Executor, JobRecord, JobSubmission } from "../src/types.js";
-import { testAuthorizationPolicy, testConfig, waitFor } from "./helpers.js";
+import { testAuthorizationPolicy, testConfig, testExecutor, waitFor } from "./helpers.js";
 
 const keyPair = generateKeyPairSync("ed25519");
 const publicKeyDer = keyPair.publicKey.export({ type: "spki", format: "der" }) as Buffer;
@@ -286,14 +286,10 @@ test("allowlisted Discord slash command completes through the generic runner and
     replyToInteraction: async () => undefined,
   };
   const adapter = new DiscordAdapter(config, api, database, []);
-  const executor: Executor = {
-    execute: async () => ({
+  const executor: Executor = testExecutor(root, async () => ({
       output: "completed through discord",
       usage: { cost: 0, inputTokens: 1, outputTokens: 2 },
-      openCodeSessionId: "discord-opencode-session",
-      workingDirectory: root,
-    }),
-  };
+    }), "discord-opencode-session");
   const runner = new AgentRunner(
     config,
     testAuthorizationPolicy(config),

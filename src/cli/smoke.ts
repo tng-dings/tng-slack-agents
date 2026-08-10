@@ -46,9 +46,16 @@ async function main(): Promise<void> {
   try {
     const health = await executor.health();
     console.log(`Connected to OpenCode ${health.version ?? "unknown"}.`);
-    const result = await executor.execute(
+    const prepared = await executor.prepareSession(
       job,
       session,
+      { onWorkingDirectory: (workingDirectory) => database.updateSessionWorkingDirectory(job.sessionKey, workingDirectory) },
+      controller.signal,
+    );
+    database.updateSessionProviderSession(job.sessionKey, prepared.providerId, prepared.providerSessionId);
+    const result = await executor.executeTurn(
+      job,
+      prepared,
       {
         onText: (delta) => {
           streamedOutput += delta;
@@ -61,7 +68,6 @@ async function main(): Promise<void> {
     );
     if (!streamedOutput && result.output) process.stdout.write(result.output);
     if (!result.output.endsWith("\n")) process.stdout.write("\n");
-    database.updateSessionExecution(job.sessionKey, result.openCodeSessionId, result.workingDirectory);
     database.completeJob(job.id, "succeeded", result.output, null, result.usage, config.storage.retainJobContent);
     await audit.log(
       "smoke_succeeded",

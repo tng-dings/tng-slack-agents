@@ -8,7 +8,7 @@ import { RunnerDatabase } from "../src/database.js";
 import { IntegrationReporterRegistry, MissingIntegrationReporterError } from "../src/integrations.js";
 import { AgentRunner, ConsoleReporter } from "../src/runner.js";
 import type { Executor, IntegrationId, JobRecord, JobReporter } from "../src/types.js";
-import { testAuthorizationPolicy, testConfig, waitFor } from "./helpers.js";
+import { testAuthorizationPolicy, testConfig, testExecutor, waitFor } from "./helpers.js";
 
 function job(integration: IntegrationId): JobRecord {
   return {
@@ -93,7 +93,7 @@ test("restart recovery uses the persisted integration reporter", async () => {
     config,
     testAuthorizationPolicy(config),
     reopened,
-    { execute: async () => Promise.reject(new Error("must not execute")) },
+    testExecutor(root, async () => Promise.reject(new Error("must not execute"))),
     audit,
     (persistedJob) => registry.reporter(persistedJob),
   );
@@ -112,14 +112,10 @@ test("missing persisted integration delivery is audited without failing executio
   config.integrations.discord = { allowedTenants: ["T1"], allowedActors: ["U_ALLOWED"] };
   const database = new RunnerDatabase(config.storage.databasePath);
   const audit = new AuditLogger(config.storage.auditLogPath, database);
-  const executor: Executor = {
-    execute: async () => ({
+  const executor: Executor = testExecutor(root, async () => ({
       output: "output-that-must-not-reach-console",
       usage: { cost: 0, inputTokens: 1, outputTokens: 1 },
-      openCodeSessionId: "session",
-      workingDirectory: root,
-    }),
-  };
+    }), "session");
   const registry = new IntegrationReporterRegistry({});
   const runner = new AgentRunner(
     config,
@@ -206,18 +202,14 @@ test("queued delivery setup finishes before streaming and terminal delivery reco
       };
     },
   });
-  const executor: Executor = {
-    execute: async (_job, _session, callbacks) => {
+  const executor: Executor = testExecutor(root, async (_job, _session, callbacks) => {
       executionStarted = true;
       await callbacks.onText("completed");
       return {
         output: "completed",
         usage: { cost: 0, inputTokens: 1, outputTokens: 1 },
-        openCodeSessionId: "session",
-        workingDirectory: root,
       };
-    },
-  };
+    }, "session");
   const runner = new AgentRunner(
     config,
     testAuthorizationPolicy(config),

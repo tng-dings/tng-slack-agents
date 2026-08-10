@@ -2,15 +2,17 @@ import { createHash, randomUUID } from "node:crypto";
 import type { AuditLogger } from "./audit.js";
 import type { RunnerConfig } from "./config.js";
 import type { RunnerDatabase } from "./database.js";
-import { AuthorizationError, LimitError, RunnerError, TimeoutError } from "./errors.js";
+import { AuthorizationError, LimitError, RunnerError, ShutdownError, TimeoutError } from "./errors.js";
 import type {
   Attachment,
   AuthorizationPolicy,
   Executor,
+  ExecutionCallbacks,
   JobRecord,
   JobReporter,
   JobSubmission,
   ReporterFactory,
+  SessionRecord,
   SubmissionResult,
   Usage,
 } from "./types.js";
@@ -88,6 +90,7 @@ export class ConsoleReporter implements JobReporter {
 
 export class AgentRunner {
   private readonly active = new Set<Promise<void>>();
+  private readonly activeControllers = new Map<string, AbortController>();
   private readonly pendingDeliverySetup = new Map<string, Promise<void>>();
   private timer?: NodeJS.Timeout;
   private maintenanceTimer?: NodeJS.Timeout;
@@ -185,6 +188,14 @@ export class AgentRunner {
     const interrupted = this.database.recoverInterruptedJobs(this.config.storage.retainJobContent);
     for (const job of interrupted) {
       await this.audit.log("job_interrupted", { reason: "runner_restart" }, this.context(job));
+    }
+    const interruptedBySession = new Map(interrupted.map((job) => [job.sessionKey, job]));
+    const reconciliationResults = await Promise.allSettled(this.database.sessionsRequiringReconciliation().map((session) =>
+      this.reconcileInterruptedSession(session, interruptedBySession.get(session.sessionKey)),
+    ));
+    const reconciliationFailure = reconciliationResults.find((result) => result.status === "rejected");
+    if (reconciliationFailure?.status === "rejected") throw reconciliationFailure.reason;
+    for (const job of interrupted) {
       const reporter = await this.resolveReporter(job, "interrupted");
       if (reporter) {
         await reporter
@@ -205,7 +216,26 @@ export class AgentRunner {
     this.stopping = true;
     if (this.timer) clearInterval(this.timer);
     if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
-    await Promise.allSettled([...this.active]);
+    for (const jobId of this.activeControllers.keys()) {
+      const job = this.database.getJob(jobId);
+      if (job) this.database.requireSessionReconciliation(job.sessionKey);
+    }
+    for (const controller of this.activeControllers.values()) {
+      if (!controller.signal.aborted) controller.abort(new ShutdownError());
+    }
+    const settlement = Promise.allSettled([...this.active]).then(() => true);
+    let shutdownTimeout: NodeJS.Timeout | undefined;
+    const bounded = await Promise.race([
+      settlement,
+      new Promise<false>((resolve) => {
+        shutdownTimeout = setTimeout(() => resolve(false), 10_000);
+      }),
+    ]).finally(() => {
+      if (shutdownTimeout) clearTimeout(shutdownTimeout);
+    });
+    if (!bounded) {
+      await this.audit.log("runner_shutdown_settlement_timed_out", { activeJobs: this.activeControllers.size });
+    }
     await this.audit.flush();
   }
 
@@ -242,7 +272,9 @@ export class AgentRunner {
     job = this.database.getJob(job.id) ?? job;
     let reporter = await this.resolveReporter(job, "running");
     let retryTerminalDelivery = false;
+    const costBeforeJob = this.database.dailyUsage(job.integration, job.tenantId, job.actorId).cost;
     const controller = new AbortController();
+    this.activeControllers.set(job.id, controller);
     const timeout = setTimeout(
       () => controller.abort(new TimeoutError(`Job exceeded ${this.config.limits.jobTimeoutSeconds} seconds`)),
       this.config.limits.jobTimeoutSeconds * 1_000,
@@ -252,16 +284,14 @@ export class AgentRunner {
     let succeeded = false;
     let failureForUser = "";
     let toolEventCount = 0;
-    const costBeforeJob = this.database.dailyUsage(job.integration, job.tenantId, job.actorId).cost;
+    let preparingSession = false;
+    let preparedTurnStarted = false;
 
     try {
       const session = this.database.getSession(job.sessionKey);
       if (!session) throw new Error(`Missing session ${job.sessionKey}`);
       await this.audit.log("job_started", { prompt: contentMetadata(job.prompt) }, this.context(job));
-      const result = await this.executor.execute(
-        job,
-        session,
-        {
+      const executionCallbacks: ExecutionCallbacks = {
           onText: async (delta) => {
             const remaining = this.config.limits.maxOutputCharacters - output.length;
             if (remaining <= 0) {
@@ -302,9 +332,30 @@ export class AgentRunner {
               controller.abort(new LimitError("The daily budget was reached while this job was running.", "DAILY_BUDGET"));
             }
           },
+        };
+      let persistedWorkingDirectory: string | undefined;
+      preparingSession = true;
+      await this.audit.log("session_preparation_started", { executionGeneration: session.executionGeneration }, this.context(job));
+      const prepared = await this.executor.prepareSession(
+        job,
+        session,
+        {
+          onWorkingDirectory: async (workingDirectory) => {
+            this.database.updateSessionWorkingDirectory(job.sessionKey, workingDirectory);
+            persistedWorkingDirectory = workingDirectory;
+            await this.audit.log("session_workspace_prepared", { reused: session.workingDirectory === workingDirectory }, this.context(job));
+          },
         },
         controller.signal,
       );
+      if (!persistedWorkingDirectory || prepared.workingDirectory !== persistedWorkingDirectory) {
+        throw new Error("Executor did not persist the prepared working directory before provider-session preparation");
+      }
+      this.database.updateSessionProviderSession(job.sessionKey, prepared.providerId, prepared.providerSessionId);
+      await this.audit.log("session_provider_prepared", { provider: prepared.providerId }, this.context(job));
+      preparingSession = false;
+      preparedTurnStarted = true;
+      const result = await this.executor.executeTurn(job, prepared, executionCallbacks, controller.signal);
       const resultOutput = result.output || output;
       if (resultOutput.length > this.config.limits.maxOutputCharacters) {
         output = resultOutput.slice(0, this.config.limits.maxOutputCharacters);
@@ -312,7 +363,6 @@ export class AgentRunner {
       }
       output = resultOutput;
       usage = result.usage;
-      this.database.updateSessionExecution(job.sessionKey, result.openCodeSessionId, result.workingDirectory);
       this.database.completeJob(job.id, "succeeded", output, null, usage, this.config.storage.retainJobContent);
       succeeded = true;
       await this.audit.log(
@@ -322,6 +372,22 @@ export class AgentRunner {
       ).catch((error: unknown) => console.error("Unable to record successful job audit", error));
     } catch (error) {
       const reason = controller.signal.aborted ? controller.signal.reason : error;
+      if (preparingSession) {
+        await this.audit.log(
+          "session_preparation_failed",
+          { ...errorMetadata(reason) },
+          this.context(job),
+        ).catch((auditError: unknown) => console.error("Unable to record provisioning failure audit", errorMetadata(auditError)));
+      }
+      if (preparedTurnStarted) {
+        this.database.requireSessionReconciliation(job.sessionKey);
+        const session = this.database.getSession(job.sessionKey);
+        if (session) {
+          await this.reconcileInterruptedSession(session, job).catch((reconciliationError: unknown) =>
+            console.error("Unable to settle failed provider turn", errorMetadata(reconciliationError)),
+          );
+        }
+      }
       const timedOut = reason instanceof TimeoutError;
       failureForUser = userFacingFailure(reason, job.id);
       this.database.completeJob(
@@ -358,6 +424,31 @@ export class AgentRunner {
       } catch (error) {
         await this.auditDeliveryFailure(job, succeeded ? "succeeded" : "failed", error);
       }
+    }
+    this.activeControllers.delete(job.id);
+  }
+
+  private async reconcileInterruptedSession(session: SessionRecord, job?: JobRecord): Promise<void> {
+    const context = job ? this.context(job) : { sessionKey: session.sessionKey };
+    if (!session.providerSessionId) {
+      this.database.completeSessionReconciliation(session.sessionKey);
+      await this.audit.log("session_reconciliation_completed", { outcome: "no_provider_session" }, context);
+      return;
+    }
+    await this.audit.log("session_reconciliation_started", { provider: session.providerId }, context);
+    try {
+      if (!session.workingDirectory) throw new Error("Interrupted provider session has no persisted working directory");
+      if (!this.executor.reconcileSession) throw new Error("Executor does not support interrupted-session reconciliation");
+      await this.executor.reconcileSession(session, AbortSignal.timeout(5_000));
+      this.database.completeSessionReconciliation(session.sessionKey);
+      await this.audit.log("session_reconciliation_completed", { outcome: "stopped" }, context);
+    } catch (error) {
+      this.database.quarantineSessionExecution(session.sessionKey);
+      await this.audit.log(
+        "session_reconciliation_completed",
+        { outcome: "quarantined", ...errorMetadata(error) },
+        context,
+      );
     }
   }
 

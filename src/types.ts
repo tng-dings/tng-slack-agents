@@ -59,8 +59,11 @@ export interface SessionRecord {
   tenantId: string;
   conversationId: string;
   threadId: string;
-  openCodeSessionId: string | null;
+  providerId: string;
+  providerSessionId: string | null;
   workingDirectory: string | null;
+  executionGeneration: number;
+  reconciliationRequired: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -100,19 +103,33 @@ export interface ExecutionCallbacks {
 export interface ExecutionResult {
   output: string;
   usage: Usage;
-  openCodeSessionId: string;
+}
+
+export interface PreparedExecutionSession {
+  providerId: string;
+  providerSessionId: string;
   workingDirectory: string;
 }
 
+export interface SessionPreparationCallbacks {
+  onWorkingDirectory(workingDirectory: string): Promise<void> | void;
+}
+
 export interface Executor {
-  execute(
+  reconcileSession?(session: SessionRecord, signal: AbortSignal): Promise<void>;
+  cleanup?(session: SessionRecord): Promise<void>;
+  prepareSession(
     job: JobRecord,
     session: SessionRecord,
+    callbacks: SessionPreparationCallbacks,
+    signal: AbortSignal,
+  ): Promise<PreparedExecutionSession>;
+  executeTurn(
+    job: JobRecord,
+    session: PreparedExecutionSession,
     callbacks: ExecutionCallbacks,
     signal: AbortSignal,
   ): Promise<ExecutionResult>;
-  abort?(openCodeSessionId: string, workingDirectory: string): Promise<void>;
-  cleanup?(session: SessionRecord): Promise<void>;
 }
 
 export interface JobReporter {

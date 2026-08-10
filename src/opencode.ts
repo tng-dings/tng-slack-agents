@@ -1,47 +1,41 @@
+import { createHash } from "node:crypto";
 import path from "node:path";
 import type { AuditLogger } from "./audit.js";
 import type { RunnerConfig } from "./config.js";
-import type { Executor, ExecutionCallbacks, ExecutionResult, JobRecord, SessionRecord, Usage } from "./types.js";
+import type {
+  ExecutionCallbacks,
+  ExecutionResult,
+  JobRecord,
+  PreparedExecutionSession,
+  Executor,
+  SessionPreparationCallbacks,
+  SessionRecord,
+} from "./types.js";
 import type { WorkspaceManager } from "./workspace.js";
 import { OpenCodeError } from "./errors.js";
-
-type JsonObject = Record<string, unknown>;
+import {
+  describePayloadShape,
+  parseBoolean,
+  parseEvent,
+  parseHealth,
+  parseMessage,
+  parseSession,
+  parseSessionList,
+  parseStatusMap,
+  type JsonObject,
+  type OpenCodePart,
+} from "./opencode-protocol.js";
+import { assertApprovedOpenCodeVersion } from "./opencode-version.js";
 
 function isObject(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function number(value: unknown): number {
-  return typeof value === "number" && Number.isFinite(value) ? value : 0;
-}
-
-function usageFromInfo(info: unknown): Usage {
-  if (!isObject(info)) return { cost: 0, inputTokens: 0, outputTokens: 0 };
-  const tokens = isObject(info.tokens) ? info.tokens : {};
-  return {
-    cost: number(info.cost),
-    inputTokens: number(tokens.input),
-    outputTokens: number(tokens.output),
-  };
-}
-
-function outputFromParts(parts: unknown): string {
-  if (!Array.isArray(parts)) return "";
+function outputFromParts(parts: OpenCodePart[]): string {
   return parts
-    .filter((part): part is JsonObject => isObject(part) && part.type === "text" && typeof part.text === "string")
+    .filter((part) => part.type === "text" && typeof part.text === "string")
     .map((part) => String(part.text))
     .join("");
-}
-
-function sessionIdForEvent(event: JsonObject): string | undefined {
-  const properties = isObject(event.properties) ? event.properties : {};
-  const part = isObject(properties.part) ? properties.part : {};
-  const info = isObject(properties.info) ? properties.info : {};
-  const permission = isObject(properties.permission) ? properties.permission : properties;
-  for (const candidate of [properties.sessionID, part.sessionID, info.sessionID, permission.sessionID]) {
-    if (typeof candidate === "string") return candidate;
-  }
-  return undefined;
 }
 
 function errorMessage(value: unknown): string {
@@ -63,28 +57,66 @@ export class OpenCodeExecutor implements Executor {
     this.authorization = `Basic ${Buffer.from(`${config.username}:${password}`, "utf8").toString("base64")}`;
   }
 
-  async health(signal = AbortSignal.timeout(5_000)): Promise<{ healthy: boolean; version?: string }> {
-    return this.request("/global/health", { signal }) as Promise<{ healthy: boolean; version?: string }>;
+  async health(signal = AbortSignal.timeout(5_000)): Promise<{ healthy: true; version: string }> {
+    const response = await this.request("/global/health", { signal });
+    const health = await this.validate("health response", response, parseHealth);
+    try {
+      assertApprovedOpenCodeVersion(health.version, this.config.approvedVersions);
+    } catch (error) {
+      await this.audit.log("opencode_version_rejected", {
+        version: health.version,
+        approvedVersions: this.config.approvedVersions,
+      });
+      throw error;
+    }
+    return health;
   }
 
-  async execute(
+  async prepareSession(
     job: JobRecord,
     session: SessionRecord,
+    callbacks: SessionPreparationCallbacks,
+    signal: AbortSignal,
+  ): Promise<PreparedExecutionSession> {
+    const workingDirectory = await this.workspaces.prepare(session.sessionKey, session.workingDirectory);
+    await callbacks.onWorkingDirectory(workingDirectory);
+    const providerSessionId = await this.ensureSession(session, workingDirectory, job.prompt, signal);
+    return { providerId: "opencode", providerSessionId, workingDirectory };
+  }
+
+  async executeTurn(
+    job: JobRecord,
+    session: PreparedExecutionSession,
     callbacks: ExecutionCallbacks,
     signal: AbortSignal,
   ): Promise<ExecutionResult> {
-    const workingDirectory = await this.workspaces.prepare(session.sessionKey, session.workingDirectory);
-    const openCodeSessionId = await this.ensureSession(session.openCodeSessionId, workingDirectory, job.prompt, signal);
+    const { providerSessionId, workingDirectory } = session;
+    let abortRequest: Promise<void> | undefined;
     const abortSession = () => {
-      void this.abort(openCodeSessionId, workingDirectory);
+      abortRequest = this.abort(providerSessionId, workingDirectory).catch(async (error: unknown) => {
+        await this.audit.log(
+          "opencode_abort_failed",
+          { error: errorMessage(error), sessionId: providerSessionId },
+        ).catch((auditError: unknown) => console.error("Unable to record OpenCode abort failure", errorMessage(auditError)));
+      });
     };
     signal.addEventListener("abort", abortSession, { once: true });
+    if (signal.aborted) abortSession();
     const eventController = new AbortController();
+    const eventFailureController = new AbortController();
     const abortEvents = () => eventController.abort(signal.reason);
     signal.addEventListener("abort", abortEvents, { once: true });
-    const eventSubscription = await this.subscribe(openCodeSessionId, workingDirectory, callbacks, eventController);
+    if (signal.aborted) abortEvents();
+    let eventSubscription: { done: Promise<void>; failure(): unknown } | undefined;
 
     try {
+      eventSubscription = await this.subscribe(
+        providerSessionId,
+        workingDirectory,
+        callbacks,
+        eventController,
+        eventFailureController,
+      );
       const parts: JsonObject[] = [{ type: "text", text: job.prompt }];
       for (const attachment of job.attachments) {
         parts.push({ type: "file", mime: attachment.mime, filename: attachment.filename, url: attachment.dataUrl });
@@ -92,46 +124,87 @@ export class OpenCodeExecutor implements Executor {
       const body: JsonObject = { parts };
       if (this.config.model) body.model = this.config.model;
       const response = await this.request(
-        `/session/${encodeURIComponent(openCodeSessionId)}/message`,
-        { method: "POST", body: JSON.stringify(body), signal },
+        `/session/${encodeURIComponent(providerSessionId)}/message`,
+        { method: "POST", body: JSON.stringify(body), signal: AbortSignal.any([signal, eventFailureController.signal]) },
         workingDirectory,
       );
-      if (!isObject(response)) throw new OpenCodeError("OpenCode returned an invalid message response");
-      const output = outputFromParts(response.parts);
-      const usage = usageFromInfo(response.info);
+      const message = await this.validate("message response", response, parseMessage);
+      const output = outputFromParts(message.parts);
+      const usage = message.usage;
       await callbacks.onUsage(usage);
-      if (Array.isArray(response.parts)) {
-        for (const part of response.parts) {
-          if (isObject(part) && part.type === "tool") await callbacks.onTool(part);
-        }
+      for (const part of message.parts) {
+        if (part.type === "tool") await callbacks.onTool(part);
       }
-      return { output, usage, openCodeSessionId, workingDirectory };
+      return { output, usage };
     } finally {
       eventController.abort();
       signal.removeEventListener("abort", abortEvents);
       signal.removeEventListener("abort", abortSession);
-      await eventSubscription.done.catch((error: unknown) => {
-        if (!eventController.signal.aborted) throw error;
-      });
+      await eventSubscription?.done.catch(() => undefined);
+      await abortRequest;
+      const eventFailure = eventSubscription?.failure();
+      if (eventFailure) throw eventFailure;
     }
   }
 
-  async abort(openCodeSessionId: string, workingDirectory: string): Promise<void> {
-    await this.request(
-      `/session/${encodeURIComponent(openCodeSessionId)}/abort`,
+  async abort(providerSessionId: string, workingDirectory: string): Promise<void> {
+    const response = await this.request(
+      `/session/${encodeURIComponent(providerSessionId)}/abort`,
       { method: "POST", body: "{}", signal: AbortSignal.timeout(5_000) },
       workingDirectory,
-    ).catch(() => undefined);
+    );
+    await this.validate("abort response", response, (value) => parseBoolean(value, "abort response"));
+  }
+
+  async reconcileSession(session: SessionRecord, signal: AbortSignal): Promise<void> {
+    if (session.providerId !== "opencode") throw new OpenCodeError(`Cannot reconcile provider ${session.providerId}`);
+    if (!session.providerSessionId || !session.workingDirectory) return;
+    const sessionId = session.providerSessionId;
+    try {
+      const abortResponse = await this.request(
+        `/session/${encodeURIComponent(sessionId)}/abort`,
+        { method: "POST", body: "{}", signal },
+        session.workingDirectory,
+      );
+      await this.validate("abort response", abortResponse, (value) => parseBoolean(value, "abort response"));
+    } catch (error) {
+      if (error instanceof OpenCodeError && error.code === "OPENCODE_NOT_FOUND") return;
+      throw error;
+    }
+    while (!signal.aborted) {
+      const response = await this.request("/session/status", { signal }, session.workingDirectory);
+      const statuses = await this.validate("session status response", response, parseStatusMap);
+      const status = statuses[sessionId];
+      if (status === undefined || status.type === "idle") return;
+      await new Promise<void>((resolve, reject) => {
+        const finish = () => {
+          signal.removeEventListener("abort", onAbort);
+          resolve();
+        };
+        const timeout = setTimeout(finish, 100);
+        const onAbort = () => {
+          clearTimeout(timeout);
+          signal.removeEventListener("abort", onAbort);
+          reject(signal.reason ?? new Error("OpenCode reconciliation was aborted"));
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        if (signal.aborted) onAbort();
+        else timeout.unref();
+      });
+    }
+    throw signal.reason ?? new Error("OpenCode reconciliation was aborted");
   }
 
   async cleanup(session: SessionRecord): Promise<void> {
-    if (!session.openCodeSessionId || !session.workingDirectory) return;
+    if (session.providerId !== "opencode") throw new OpenCodeError(`Cannot clean up provider ${session.providerId}`);
+    if (!session.providerSessionId || !session.workingDirectory) return;
     try {
-      await this.request(
-        `/session/${encodeURIComponent(session.openCodeSessionId)}`,
+      const response = await this.request(
+        `/session/${encodeURIComponent(session.providerSessionId)}`,
         { method: "DELETE", signal: AbortSignal.timeout(5_000) },
         session.workingDirectory,
       );
+      await this.validate("delete session response", response, (value) => parseBoolean(value, "delete session response"));
     } catch (error) {
       if (!(error instanceof OpenCodeError) || error.code !== "OPENCODE_NOT_FOUND") throw error;
     }
@@ -139,37 +212,58 @@ export class OpenCodeExecutor implements Executor {
   }
 
   private async ensureSession(
-    existingId: string | null,
+    session: SessionRecord,
     workingDirectory: string,
     prompt: string,
     signal: AbortSignal,
   ): Promise<string> {
+    if (session.providerId !== "opencode") throw new OpenCodeError(`Cannot prepare provider ${session.providerId}`);
+    const existingId = session.providerSessionId;
     if (existingId) {
       try {
-        await this.request(`/session/${encodeURIComponent(existingId)}`, { signal }, workingDirectory);
+        const response = await this.request(`/session/${encodeURIComponent(existingId)}`, { signal }, workingDirectory);
+        await this.validate("session response", response, parseSession);
         return existingId;
       } catch (error) {
         if (!(error instanceof OpenCodeError) || error.code !== "OPENCODE_NOT_FOUND") throw error;
       }
     }
-    const title = prompt.replace(/\s+/g, " ").trim().slice(0, 80) || "Slack coding task";
+    const marker = createHash("sha256")
+      .update(`${session.sessionKey}:${session.executionGeneration}`)
+      .digest("hex")
+      .slice(0, 24);
+    const titlePrefix = `[agent-runner:${marker}]`;
+    const sessionResponse = await this.request("/session", { signal }, workingDirectory);
+    const sessions = await this.validate("session list response", sessionResponse, parseSessionList);
+    const matching = sessions
+      .filter((value) => {
+        if (!value.title.startsWith(titlePrefix)) return false;
+        const candidate = path.resolve(value.directory);
+        const expected = path.resolve(workingDirectory);
+        return process.platform === "win32" ? candidate.toLowerCase() === expected.toLowerCase() : candidate === expected;
+      })
+      .sort((left, right) => {
+        return right.time.created - left.time.created;
+      });
+    if (matching.length > 0) return String(matching[0]!.id);
+
+    const promptTitle = prompt.replace(/\s+/g, " ").trim().slice(0, 80) || "Coding task";
+    const title = `${titlePrefix} ${promptTitle}`;
     const response = await this.request(
       "/session",
       { method: "POST", body: JSON.stringify({ title }), signal },
       workingDirectory,
     );
-    if (!isObject(response) || typeof response.id !== "string") {
-      throw new OpenCodeError("OpenCode did not return a session ID");
-    }
-    return response.id;
+    return (await this.validate("create session response", response, (value) => parseSession(value, "create session response"))).id;
   }
 
   private async subscribe(
-    openCodeSessionId: string,
+    providerSessionId: string,
     workingDirectory: string,
     callbacks: ExecutionCallbacks,
     controller: AbortController,
-  ): Promise<{ done: Promise<void> }> {
+    failureController: AbortController,
+  ): Promise<{ done: Promise<void>; failure(): unknown }> {
     const response = await fetch(this.url("/event", workingDirectory), {
       headers: this.headers(),
       redirect: "error",
@@ -178,34 +272,40 @@ export class OpenCodeExecutor implements Executor {
     if (!response.ok || !response.body) {
       throw new OpenCodeError(`Unable to subscribe to OpenCode events (${response.status})`);
     }
-    const task = this.consumeSse(response.body, async (event) => {
-      if (sessionIdForEvent(event) !== openCodeSessionId) return;
-      const properties = isObject(event.properties) ? event.properties : {};
-      if (event.type === "message.part.updated") {
-        const part = isObject(properties.part) ? properties.part : {};
-        if (part.type === "text" && typeof properties.delta === "string") {
-          await callbacks.onText(properties.delta);
-        } else if (part.type === "tool") {
-          await callbacks.onTool(part);
-        }
-      } else if (event.type === "message.updated") {
-        await callbacks.onUsage(usageFromInfo(properties.info));
-      } else if (event.type === "permission.updated") {
-        const permission = isObject(properties.permission) ? properties.permission : properties;
-        if (typeof permission.id === "string") {
-          await this.audit.log("opencode_permission_rejected", {
-            permissionId: permission.id,
-            sessionId: openCodeSessionId,
-          });
-          await this.request(
-            `/session/${encodeURIComponent(openCodeSessionId)}/permissions/${encodeURIComponent(permission.id)}`,
-            { method: "POST", body: JSON.stringify({ response: "reject", remember: false }), signal: controller.signal },
-            workingDirectory,
-          );
-        }
+    let failure: unknown;
+    const task = this.consumeSse(response.body, async (rawEvent) => {
+      const eventType = typeof rawEvent.type === "string" ? rawEvent.type : undefined;
+      const event = await this.validate("event", rawEvent, parseEvent, eventType ? { eventType } : {});
+      if (event.kind === "unknown") {
+        await this.audit.log("opencode_unknown_event", { eventType: event.eventType });
+        return;
       }
-    }, controller.signal);
-    return { done: task };
+      if (event.kind === "ignored" || event.sessionId !== providerSessionId) return;
+      if (event.kind === "text") await callbacks.onText(event.delta);
+      if (event.kind === "tool") await callbacks.onTool(event.part);
+      if (event.kind === "usage") await callbacks.onUsage(event.usage);
+      if (event.kind === "permission") {
+        await this.audit.log("opencode_permission_rejected", {
+          permissionId: event.permissionId,
+          sessionId: providerSessionId,
+        });
+        const permissionResponse = await this.request(
+          `/session/${encodeURIComponent(providerSessionId)}/permissions/${encodeURIComponent(event.permissionId)}`,
+          { method: "POST", body: JSON.stringify({ response: "reject", remember: false }), signal: controller.signal },
+          workingDirectory,
+        );
+        await this.validate(
+          "permission response",
+          permissionResponse,
+          (value) => parseBoolean(value, "permission response"),
+        );
+      }
+    }, controller.signal).catch((error: unknown) => {
+      failure = error;
+      failureController.abort(error);
+      throw error;
+    });
+    return { done: task, failure: () => failure };
   }
 
   private async consumeSse(
@@ -219,7 +319,10 @@ export class OpenCodeExecutor implements Executor {
     try {
       while (!signal.aborted) {
         const { done, value } = await reader.read();
-        if (done) break;
+        if (done) {
+          if (!signal.aborted) throw new OpenCodeError("OpenCode event stream ended unexpectedly", "OPENCODE_EVENT_STREAM_ENDED");
+          break;
+        }
         buffer += decoder.decode(value, { stream: true }).replace(/\r\n/g, "\n");
         if (buffer.length > this.maxResponseCharacters) {
           throw new OpenCodeError("OpenCode event exceeded the configured response limit", "OPENCODE_RESPONSE_LIMIT");
@@ -234,12 +337,22 @@ export class OpenCodeExecutor implements Executor {
             .map((line) => line.slice(5).trimStart())
             .join("\n");
           if (data) {
+            let parsed: unknown;
             try {
-              const parsed: unknown = JSON.parse(data);
-              if (isObject(parsed)) await onEvent(parsed);
+              parsed = JSON.parse(data);
             } catch (error) {
               await this.audit.log("opencode_event_parse_failed", { dataCharacters: data.length, error: errorMessage(error) });
+              boundary = buffer.indexOf("\n\n");
+              continue;
             }
+            if (!isObject(parsed)) {
+              await this.audit.log("opencode_schema_mismatch", {
+                schema: "event",
+                ...describePayloadShape(parsed),
+              });
+              throw new OpenCodeError("OpenCode event schema mismatch at $: expected an object", "OPENCODE_SCHEMA_MISMATCH");
+            }
+            await onEvent(parsed);
           }
           boundary = buffer.indexOf("\n\n");
         }
@@ -248,6 +361,26 @@ export class OpenCodeExecutor implements Executor {
       if (!signal.aborted) throw error;
     } finally {
       reader.releaseLock();
+    }
+  }
+
+  private async validate<T>(
+    schema: string,
+    value: unknown,
+    parser: (value: unknown) => T,
+    metadata: Record<string, unknown> = {},
+  ): Promise<T> {
+    try {
+      return parser(value);
+    } catch (error) {
+      if (error instanceof OpenCodeError && error.code === "OPENCODE_SCHEMA_MISMATCH") {
+        await this.audit.log("opencode_schema_mismatch", {
+          schema,
+          ...metadata,
+          ...describePayloadShape(value),
+        });
+      }
+      throw error;
     }
   }
 

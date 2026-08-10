@@ -26,6 +26,12 @@ export class TimeoutError extends RunnerError {
   }
 }
 
+export class ShutdownError extends RunnerError {
+  constructor() {
+    super("The agent runner is shutting down.", "RUNNER_SHUTDOWN");
+  }
+}
+
 export class OpenCodeError extends RunnerError {
   constructor(message: string, code = "OPENCODE_ERROR") {
     super(message, code);

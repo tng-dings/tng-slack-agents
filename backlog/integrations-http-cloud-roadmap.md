@@ -33,6 +33,8 @@ or `"ingress": "events-api"`. Exact names may follow existing configuration conv
 
 Milestone 1 is complete. The service now has an integration-aware orchestration boundary while preserving the existing Slack Socket Mode behavior:
 
+The OpenCode execution boundary and its comparison with BBX are documented in [`docs/opencode-runtime-evaluation.md`](../docs/opencode-runtime-evaluation.md). Phase 1 lifecycle/crash safety and the repository-side Phase 2 provider-neutral/strict-contract work are complete. Live version approval and the later workspace-lifecycle work remain open as recorded below.
+
 - [`src/slack.ts`](../src/slack.ts) selects either the Socket Mode or Events API ingress while sharing Slack behavior from [`src/slack/normalization.ts`](../src/slack/normalization.ts), [`src/slack/adapter.ts`](../src/slack/adapter.ts), and [`src/slack/delivery.ts`](../src/slack/delivery.ts).
 - [`src/runner.ts`](../src/runner.ts) owns durable submission, limits, queueing, execution, and delivery lifecycle. Authorization and reporter selection are injected; the runner does not read Slack configuration or choose a Slack reporter.
 - [`src/types.ts`](../src/types.ts) defines normalized integration, tenant, conversation, thread, actor, and source-event identities alongside the existing executor and reporter seams.
@@ -42,6 +44,32 @@ Milestone 1 is complete. The service now has an integration-aware orchestration 
 - [`src/opencode.ts`](../src/opencode.ts) still requires a loopback OpenCode server and local worktree path. Replacing that runtime boundary is not required for Slack HTTPS ingress.
 
 The durable queue and executor remain the foundation. The remaining HTTPS work is production-edge hardening and deployment evidence rather than another orchestration path.
+
+## OpenCode runtime handoff
+
+Completed in the August 2026 runtime-hardening milestone:
+
+- [x] Persist the verified worktree and provider session before prompt submission, with idempotent recovery after failures and restarts.
+- [x] Cancel active controllers during bounded graceful shutdown and durably reconcile or quarantine interrupted remote sessions before releasing queued work.
+- [x] Add provider-neutral `provider_id` and `provider_session_id` persistence while retaining and dual-writing the legacy OpenCode column for rollback compatibility.
+- [x] Remove OpenCode-specific identities and the legacy monolithic executor path from the generic runner contract.
+- [x] Strictly validate every consumed OpenCode REST response and SSE event, with bounded value-free audits for schema mismatches and unknown event types.
+- [x] Fail startup and `doctor` unless the authenticated health response reports an exact configured version, and document upgrade/rollback in [`docs/opencode-upgrade-runbook.md`](../docs/opencode-upgrade-runbook.md).
+
+Next operator-assisted validation (do not enable Slack or Discord gateways until these are complete):
+
+- [ ] Configure a model provider for the Windows identity that will run OpenCode. Interactive development can use `opencode` followed by `/connect`; the service identity must ultimately receive its separately scoped provider credential through the worker secret bundle.
+- [ ] Create the ignored `config.json` from `config.example.json` and point `openCode.workingRepository` at a disposable Git repository. No `config.json` existed when this handoff was written.
+- [ ] Validate the installed native-Windows candidate with the full matrix in the upgrade runbook. Current candidate: Scoop `main/opencode` version `1.18.15`, shim `C:\Users\Simon\scoop\shims\opencode.exe`, x64 archive SHA-256 `A80785874978CCBB93B7BFE4345F5AED41696F5AE76C109CD6DBBB934DBE795D`, installed executable SHA-256 `FD254474DEF7EE35F07416CF4674C361F07E7BCD9C7FFB284AF21BB011066EE3`.
+- [ ] Only after that matrix passes, add `"1.18.15"` to `openCode.approvedVersions`, start the authenticated loopback server, and run `npm run doctor` followed by `npm run smoke`.
+- [ ] Record the live results and check the remaining Phase 2 version-approval box in the runtime evaluation. A schema mismatch, unknown event, cancellation/reconciliation failure, or redaction leak blocks approval.
+- [ ] Before installing Windows services, write the resolved versioned `opencode.exe` path to `%ProgramData%\OpenCodeWorker\opencode-path.txt`, provision the separated DPAPI bundles, and rerun the security validation described in the README/security review.
+
+Repository follow-up after live approval:
+
+- [ ] Implement Phase 3 workspace maturity from the runtime evaluation: explicit lifecycle state, source revision/branch policy, bounded setup, safe orphan discovery, and preserve/archive/delete behavior.
+- [ ] Retain `opencode_session_id` for at least one compatibility milestone; remove it only through a later reviewed additive migration after rollback compatibility is no longer required.
+- [ ] Begin the Phase 4 ACP experiment only after lifecycle correctness and the native HTTP/SSE compatibility baseline are proven. Keep it behind the provider-neutral executor seam rather than replacing the durable gateway/queue.
 
 ## Target boundary
 

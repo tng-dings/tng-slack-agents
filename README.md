@@ -27,14 +27,15 @@ OpenCode officially recommends WSL for the best Windows compatibility, but this 
 
 1. Run `npm install`.
 2. Copy `config.example.json` to the ignored `config.json` and set `openCode.workingRepository` to a disposable Git repository.
-3. Start OpenCode in one PowerShell window with the same password used by the client:
+3. Run `opencode --version`, complete the compatibility checks in the [OpenCode upgrade runbook](docs/opencode-upgrade-runbook.md), and replace the `openCode.approvedVersions` placeholder with that exact validated version. An empty or non-matching allowlist prevents the runner from accepting work.
+4. Start OpenCode in one PowerShell window with the same password used by the client:
 
    ```powershell
    $env:OPENCODE_SERVER_PASSWORD = '<a-long-random-password>'
    opencode serve --hostname 127.0.0.1 --port 4096
    ```
 
-4. In a second window, set only the client-side password and run the hardcoded smoke prompt:
+5. In a second window, set only the client-side password and run the hardcoded smoke prompt:
 
    ```powershell
    $env:OPENCODE_SERVER_PASSWORD = '<the-same-password>'
@@ -43,7 +44,7 @@ OpenCode officially recommends WSL for the best Windows compatibility, but this 
 
    An optional prompt can be supplied after `--`, for example `npm run smoke -- "Review the tests"`.
 
-The smoke command performs the server health check, creates/reuses its persistent session and worktree, consumes SSE events, prints the response, and records usage and tool events.
+The smoke command performs the server health and exact-version approval check, creates/reuses its persistent session and worktree, consumes strictly validated SSE events, prints the response, and records usage and tool events.
 
 ## Slack development run
 

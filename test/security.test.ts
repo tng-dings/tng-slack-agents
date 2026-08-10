@@ -9,7 +9,7 @@ import { RunnerDatabase } from "../src/database.js";
 import { AgentRunner } from "../src/runner.js";
 import { unprivilegedChildEnvironment } from "../src/environment.js";
 import type { Executor, JobReporter } from "../src/types.js";
-import { testAuthorizationPolicy, testConfig, waitFor } from "./helpers.js";
+import { testAuthorizationPolicy, testConfig, testExecutor, waitFor } from "./helpers.js";
 
 test("configuration rejects a non-loopback OpenCode endpoint", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-config-"));
@@ -34,6 +34,25 @@ test("configuration rejects unsafe native Slack streaming", async () => {
   };
   await writeFile(filename, JSON.stringify(config));
   await assert.rejects(loadConfig(filename), /cannot be safely redacted/);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("configuration accepts only an explicit OpenCode version allowlist", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-opencode-version-config-"));
+  const filename = path.join(root, "config.json");
+  const config = {
+    slack: { enabled: false, allowedWorkspaceIds: [], allowedUserIds: [] },
+    openCode: {
+      baseUrl: "http://127.0.0.1:4096",
+      workingRepository: root,
+      approvedVersions: ["1.2.3", "1.2.4"],
+    },
+    storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
+  };
+  await writeFile(filename, JSON.stringify(config));
+  assert.deepEqual((await loadConfig(filename)).openCode.approvedVersions, ["1.2.3", "1.2.4"]);
+  await writeFile(filename, JSON.stringify({ ...config, openCode: { ...config.openCode, approvedVersions: [""] } }));
+  await assert.rejects(loadConfig(filename), /openCode\.approvedVersions/);
   await rm(root, { recursive: true, force: true });
 });
 
@@ -207,14 +226,10 @@ test("Slack delivery failure cannot change a successful execution result", async
     succeed: async () => { throw new Error("Slack unavailable"); },
     fail: async () => undefined,
   };
-  const executor: Executor = {
-    execute: async () => ({
+  const executor: Executor = testExecutor(root, async () => ({
       output: "completed",
       usage: { cost: 0, inputTokens: 1, outputTokens: 1 },
-      openCodeSessionId: "session",
-      workingDirectory: root,
-    }),
-  };
+    }), "session");
   const runner = new AgentRunner(config, testAuthorizationPolicy(config), database, executor, audit, () => reporter);
   await runner.start();
   const { job } = await runner.submit({
@@ -246,12 +261,10 @@ test("runner enforces the configured output bound", async () => {
     succeed: async () => undefined,
     fail: async (message) => { failure = message; },
   };
-  const executor: Executor = {
-    execute: async (_job, _session, callbacks) => {
+  const executor: Executor = testExecutor(root, async (_job, _session, callbacks) => {
       await callbacks.onText("12345");
       throw new Error("output callback should reject");
-    },
-  };
+    });
   const runner = new AgentRunner(config, testAuthorizationPolicy(config), database, executor, audit, () => reporter);
   await runner.start();
   const { job } = await runner.submit({
