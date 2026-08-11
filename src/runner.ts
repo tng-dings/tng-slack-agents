@@ -18,6 +18,7 @@ import type {
 } from "./types.js";
 
 const emptyUsage = (): Usage => ({ cost: 0, inputTokens: 0, outputTokens: 0 });
+const reconciliationRetryMilliseconds = 1_000;
 
 function contentMetadata(value: string): { characters: number; sha256: string } {
   return { characters: value.length, sha256: createHash("sha256").update(value).digest("hex") };
@@ -91,9 +92,11 @@ export class ConsoleReporter implements JobReporter {
 export class AgentRunner {
   private readonly active = new Set<Promise<void>>();
   private readonly activeControllers = new Map<string, AbortController>();
+  private readonly activeProviderTurns = new Set<string>();
   private readonly pendingDeliverySetup = new Map<string, Promise<void>>();
   private timer?: NodeJS.Timeout;
   private maintenanceTimer?: NodeJS.Timeout;
+  private reconciliationRetryTimer: NodeJS.Timeout | undefined;
   private stopping = false;
 
   constructor(
@@ -195,6 +198,14 @@ export class AgentRunner {
     ));
     const reconciliationFailure = reconciliationResults.find((result) => result.status === "rejected");
     if (reconciliationFailure?.status === "rejected") throw reconciliationFailure.reason;
+    const blockedSessions = this.database.sessionsRequiringReconciliation();
+    if (blockedSessions.length > 0) {
+      await this.audit.log("runner_startup_blocked", { blockedSessionCount: blockedSessions.length });
+      throw new RunnerError(
+        `AgentRunner startup is blocked by ${blockedSessions.length} unreconciled provider session(s)`,
+        "SESSION_RECONCILIATION_REQUIRED",
+      );
+    }
     for (const job of interrupted) {
       const reporter = await this.resolveReporter(job, "interrupted");
       if (reporter) {
@@ -216,7 +227,8 @@ export class AgentRunner {
     this.stopping = true;
     if (this.timer) clearInterval(this.timer);
     if (this.maintenanceTimer) clearInterval(this.maintenanceTimer);
-    for (const jobId of this.activeControllers.keys()) {
+    if (this.reconciliationRetryTimer) clearTimeout(this.reconciliationRetryTimer);
+    for (const jobId of this.activeProviderTurns) {
       const job = this.database.getJob(jobId);
       if (job) this.database.requireSessionReconciliation(job.sessionKey);
     }
@@ -257,9 +269,16 @@ export class AgentRunner {
         this.config.limits.maxConcurrentJobsGlobal,
       );
       if (!job) return;
-      const task = this.process(job)
-        .catch((error: unknown) => console.error("Job processing failed unexpectedly", errorMetadata(error)))
+      const controller = new AbortController();
+      this.activeControllers.set(job.id, controller);
+      const task = this.process(job, controller)
+        .catch((error: unknown) => {
+          if (!(error instanceof ShutdownError)) {
+            console.error("Job processing failed unexpectedly", errorMetadata(error));
+          }
+        })
         .finally(() => {
+          this.activeControllers.delete(job.id);
           this.active.delete(task);
           queueMicrotask(() => this.pump());
         });
@@ -267,18 +286,11 @@ export class AgentRunner {
     }
   }
 
-  private async process(job: JobRecord): Promise<void> {
-    await this.pendingDeliverySetup.get(job.id);
-    job = this.database.getJob(job.id) ?? job;
-    let reporter = await this.resolveReporter(job, "running");
+  private async process(job: JobRecord, controller: AbortController): Promise<void> {
+    let reporter: JobReporter | undefined;
     let retryTerminalDelivery = false;
-    const costBeforeJob = this.database.dailyUsage(job.integration, job.tenantId, job.actorId).cost;
-    const controller = new AbortController();
-    this.activeControllers.set(job.id, controller);
-    const timeout = setTimeout(
-      () => controller.abort(new TimeoutError(`Job exceeded ${this.config.limits.jobTimeoutSeconds} seconds`)),
-      this.config.limits.jobTimeoutSeconds * 1_000,
-    );
+    let costBeforeJob = 0;
+    let timeout: NodeJS.Timeout | undefined;
     let output = "";
     let usage = emptyUsage();
     let succeeded = false;
@@ -288,6 +300,15 @@ export class AgentRunner {
     let preparedTurnStarted = false;
 
     try {
+      await this.pendingDeliverySetup.get(job.id);
+      job = this.database.getJob(job.id) ?? job;
+      reporter = await this.resolveReporter(job, "running");
+      if (controller.signal.aborted) throw controller.signal.reason;
+      costBeforeJob = this.database.dailyUsage(job.integration, job.tenantId, job.actorId).cost;
+      timeout = setTimeout(
+        () => controller.abort(new TimeoutError(`Job exceeded ${this.config.limits.jobTimeoutSeconds} seconds`)),
+        this.config.limits.jobTimeoutSeconds * 1_000,
+      );
       const session = this.database.getSession(job.sessionKey);
       if (!session) throw new Error(`Missing session ${job.sessionKey}`);
       await this.audit.log("job_started", { prompt: contentMetadata(job.prompt) }, this.context(job));
@@ -355,7 +376,9 @@ export class AgentRunner {
       await this.audit.log("session_provider_prepared", { provider: prepared.providerId }, this.context(job));
       preparingSession = false;
       preparedTurnStarted = true;
-      const result = await this.executor.executeTurn(job, prepared, executionCallbacks, controller.signal);
+      this.activeProviderTurns.add(job.id);
+      const result = await this.executor.executeTurn(job, prepared, executionCallbacks, controller.signal)
+        .finally(() => this.activeProviderTurns.delete(job.id));
       const resultOutput = result.output || output;
       if (resultOutput.length > this.config.limits.maxOutputCharacters) {
         output = resultOutput.slice(0, this.config.limits.maxOutputCharacters);
@@ -386,6 +409,9 @@ export class AgentRunner {
           await this.reconcileInterruptedSession(session, job).catch((reconciliationError: unknown) =>
             console.error("Unable to settle failed provider turn", errorMetadata(reconciliationError)),
           );
+          if (this.database.getSession(job.sessionKey)?.reconciliationRequired) {
+            this.scheduleReconciliationRetry();
+          }
         }
       }
       const timedOut = reason instanceof TimeoutError;
@@ -404,7 +430,8 @@ export class AgentRunner {
         this.context(job),
       ).catch((auditError: unknown) => console.error("Unable to record failed job audit", auditError));
     } finally {
-      clearTimeout(timeout);
+      if (timeout) clearTimeout(timeout);
+      this.activeProviderTurns.delete(job.id);
     }
 
     if (!reporter && retryTerminalDelivery) {
@@ -425,7 +452,6 @@ export class AgentRunner {
         await this.auditDeliveryFailure(job, succeeded ? "succeeded" : "failed", error);
       }
     }
-    this.activeControllers.delete(job.id);
   }
 
   private async reconcileInterruptedSession(session: SessionRecord, job?: JobRecord): Promise<void> {
@@ -443,12 +469,36 @@ export class AgentRunner {
       this.database.completeSessionReconciliation(session.sessionKey);
       await this.audit.log("session_reconciliation_completed", { outcome: "stopped" }, context);
     } catch (error) {
-      this.database.quarantineSessionExecution(session.sessionKey);
+      this.database.requireSessionReconciliation(session.sessionKey);
       await this.audit.log(
         "session_reconciliation_completed",
         { outcome: "quarantined", ...errorMetadata(error) },
         context,
       );
+    }
+  }
+
+  private scheduleReconciliationRetry(): void {
+    if (this.stopping || this.reconciliationRetryTimer) return;
+    this.reconciliationRetryTimer = setTimeout(() => {
+      this.reconciliationRetryTimer = undefined;
+      void this.retryBlockedSessions().catch((error: unknown) => {
+        console.error("Unable to retry provider-session reconciliation", errorMetadata(error));
+        this.scheduleReconciliationRetry();
+      });
+    }, reconciliationRetryMilliseconds);
+    this.reconciliationRetryTimer.unref();
+  }
+
+  private async retryBlockedSessions(): Promise<void> {
+    if (this.stopping) return;
+    const sessions = this.database.sessionsRequiringReconciliation();
+    if (sessions.length === 0) return;
+    await Promise.all(sessions.map((session) => this.reconcileInterruptedSession(session)));
+    if (this.database.sessionsRequiringReconciliation().length > 0) {
+      this.scheduleReconciliationRetry();
+    } else {
+      queueMicrotask(() => this.pump());
     }
   }
 

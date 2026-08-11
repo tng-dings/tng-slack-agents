@@ -41,7 +41,7 @@ Perform validation with a disposable repository and the same native-Windows serv
 3. Restore the previously approved OpenCode binary and worker configuration. Do not reverse or delete the additive SQLite columns.
 4. Remove the rejected candidate from `openCode.approvedVersions`, keep the restored exact version, and restart OpenCode.
 5. Run `npm run doctor`. Start AgentRunner only after health, schema, authentication, and version checks pass.
-6. Confirm any durable `reconciliation_required` sessions settle or quarantine before gateways resume.
+6. Run `npm run status`, then start AgentRunner and confirm it does not fail with `SESSION_RECONCILIATION_REQUIRED`. If status is blocked or startup fails, keep gateways stopped, restore OpenCode health, and restart AgentRunner so the old provider turns can be stopped and retired.
 7. Preserve audit evidence and document the failing schema/event/version. Add a regression fixture before attempting the upgrade again.
 
 ## Emergency override

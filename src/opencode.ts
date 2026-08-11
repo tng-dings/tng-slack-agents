@@ -44,6 +44,12 @@ function errorMessage(value: unknown): string {
   return JSON.stringify(value).slice(0, 2_000);
 }
 
+function errorMetadata(value: unknown): { errorType: string; errorCode?: string } {
+  if (value instanceof OpenCodeError) return { errorType: value.name, errorCode: value.code };
+  if (value instanceof Error) return { errorType: value.name || "Error" };
+  return { errorType: typeof value };
+}
+
 export class OpenCodeExecutor implements Executor {
   private readonly authorization: string;
 
@@ -96,8 +102,8 @@ export class OpenCodeExecutor implements Executor {
       abortRequest = this.abort(providerSessionId, workingDirectory).catch(async (error: unknown) => {
         await this.audit.log(
           "opencode_abort_failed",
-          { error: errorMessage(error), sessionId: providerSessionId },
-        ).catch((auditError: unknown) => console.error("Unable to record OpenCode abort failure", errorMessage(auditError)));
+          { ...errorMetadata(error), sessionId: providerSessionId },
+        ).catch((auditError: unknown) => console.error("Unable to record OpenCode abort failure", errorMetadata(auditError)));
       });
     };
     signal.addEventListener("abort", abortSession, { once: true });
@@ -197,16 +203,18 @@ export class OpenCodeExecutor implements Executor {
 
   async cleanup(session: SessionRecord): Promise<void> {
     if (session.providerId !== "opencode") throw new OpenCodeError(`Cannot clean up provider ${session.providerId}`);
-    if (!session.providerSessionId || !session.workingDirectory) return;
-    try {
-      const response = await this.request(
-        `/session/${encodeURIComponent(session.providerSessionId)}`,
-        { method: "DELETE", signal: AbortSignal.timeout(5_000) },
-        session.workingDirectory,
-      );
-      await this.validate("delete session response", response, (value) => parseBoolean(value, "delete session response"));
-    } catch (error) {
-      if (!(error instanceof OpenCodeError) || error.code !== "OPENCODE_NOT_FOUND") throw error;
+    if (!session.workingDirectory) return;
+    if (session.providerSessionId) {
+      try {
+        const response = await this.request(
+          `/session/${encodeURIComponent(session.providerSessionId)}`,
+          { method: "DELETE", signal: AbortSignal.timeout(5_000) },
+          session.workingDirectory,
+        );
+        await this.validate("delete session response", response, (value) => parseBoolean(value, "delete session response"));
+      } catch (error) {
+        if (!(error instanceof OpenCodeError) || error.code !== "OPENCODE_NOT_FOUND") throw error;
+      }
     }
     await this.workspaces.cleanup(session.workingDirectory);
   }
@@ -280,7 +288,15 @@ export class OpenCodeExecutor implements Executor {
         await this.audit.log("opencode_unknown_event", { eventType: event.eventType });
         return;
       }
-      if (event.kind === "ignored" || event.sessionId !== providerSessionId) return;
+      if (event.kind === "ignored") return;
+      if (event.kind === "error") {
+        if (event.sessionId && event.sessionId !== providerSessionId) return;
+        await this.audit.log("opencode_session_error", {
+          ...(event.sessionId ? { sessionId: event.sessionId } : {}),
+        });
+        throw new OpenCodeError("OpenCode session reported an error", "OPENCODE_PROVIDER_ERROR");
+      }
+      if (event.sessionId !== providerSessionId) return;
       if (event.kind === "text") await callbacks.onText(event.delta);
       if (event.kind === "tool") await callbacks.onTool(event.part);
       if (event.kind === "usage") await callbacks.onUsage(event.usage);
@@ -391,9 +407,9 @@ export class OpenCodeExecutor implements Executor {
       redirect: "error",
     });
     if (!response.ok) {
-      const detail = await this.readResponseText(response, 2_000);
+      await this.readResponseText(response, 2_000);
       throw new OpenCodeError(
-        `OpenCode request ${endpoint} failed (${response.status}): ${detail}`,
+        `OpenCode request ${endpoint} failed (${response.status})`,
         response.status === 404 ? "OPENCODE_NOT_FOUND" : "OPENCODE_HTTP_ERROR",
       );
     }

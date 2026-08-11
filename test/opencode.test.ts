@@ -7,7 +7,9 @@ import path from "node:path";
 import test from "node:test";
 import { AuditLogger } from "../src/audit.js";
 import { RunnerDatabase } from "../src/database.js";
+import { OpenCodeError } from "../src/errors.js";
 import { OpenCodeExecutor } from "../src/opencode.js";
+import { parseEvent, parseMessage } from "../src/opencode-protocol.js";
 import { AgentRunner } from "../src/runner.js";
 import { WorkspaceManager } from "../src/workspace.js";
 import { testAuthorizationPolicy, testConfig, waitFor } from "./helpers.js";
@@ -22,6 +24,67 @@ function openCodeSession(id: string, directory: string, title = "Test session") 
     time: { created: 1, updated: 1 },
   };
 }
+
+test("OpenCode protocol rejects error-bearing assistant messages and surfaces session errors", () => {
+  assert.throws(
+    () => parseMessage({
+      info: {
+        error: { name: "ProviderAuthError", data: { message: "must not be exposed" } },
+        cost: 0,
+        tokens: { input: 0, output: 0 },
+      },
+      parts: [],
+    }),
+    (error: unknown) => error instanceof OpenCodeError && error.code === "OPENCODE_PROVIDER_ERROR",
+  );
+  assert.deepEqual(
+    parseEvent({
+      type: "session.error",
+      properties: {
+        sessionID: "failed-session",
+        error: { name: "APIError", data: { message: "must not be exposed" } },
+      },
+    }),
+    { kind: "error", sessionId: "failed-session" },
+  );
+  assert.deepEqual(
+    parseEvent({
+      type: "session.error",
+      properties: { sessionID: "failed-session", error: { name: "must-not-be-audited" } },
+    }),
+    { kind: "error", sessionId: "failed-session" },
+  );
+});
+
+test("OpenCode cleanup removes a known worktree without a provider session", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-opencode-cleanup-"));
+  const config = testConfig(root);
+  const database = new RunnerDatabase(config.storage.databasePath);
+  const audit = new AuditLogger(config.storage.auditLogPath, database);
+  const workingDirectory = path.join(root, "worktree");
+  let cleanedDirectory: string | undefined;
+  const workspaces = {
+    cleanup: async (directory: string) => { cleanedDirectory = directory; },
+  } as unknown as WorkspaceManager;
+  const executor = new OpenCodeExecutor(config.openCode, "password", workspaces, audit);
+  await executor.cleanup({
+    sessionKey: "local:local:cli:cleanup",
+    integration: "local",
+    tenantId: "local",
+    conversationId: "cli",
+    threadId: "cleanup",
+    providerId: "opencode",
+    providerSessionId: null,
+    workingDirectory,
+    executionGeneration: 1,
+    reconciliationRequired: false,
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+  });
+  assert.equal(cleanedDirectory, workingDirectory);
+  database.close();
+  await rm(root, { recursive: true, force: true });
+});
 
 test("OpenCode executor sends file parts for image attachments", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-attach-opencode-"));
@@ -343,11 +406,15 @@ test("first-turn provisioning failures persist and recover the worktree and Open
           return;
         }
         const body = JSON.parse(raw) as { title: string };
-        createdSession = openCodeSession("session-boundary", directory, body.title);
+        createdSession = openCodeSession(
+          createAttempts === 2 ? "session-boundary" : "session-replacement",
+          directory,
+          body.title,
+        );
         response.setHeader("content-type", "application/json");
         // Simulate a crash/transport ambiguity after OpenCode has durably
         // created the session but before its ID can be persisted locally.
-        response.end(JSON.stringify({ created: true }));
+        response.end(JSON.stringify(createAttempts === 2 ? { created: true } : createdSession));
       });
       return;
     }
@@ -363,9 +430,12 @@ test("first-turn provisioning failures persist and recover the worktree and Open
       request.on("close", () => subscribers.delete(response));
       return;
     }
-    if (request.method === "POST" && url.pathname === "/session/session-boundary/message") {
+    if (request.method === "POST" && [
+      "/session/session-boundary/message",
+      "/session/session-replacement/message",
+    ].includes(url.pathname)) {
       messageAttempts += 1;
-      if (messageAttempts === 1) {
+      if (url.pathname === "/session/session-boundary/message") {
         response.statusCode = 500;
         response.end("message unavailable");
       } else {
@@ -435,12 +505,14 @@ test("first-turn provisioning failures persist and recover the worktree and Open
 
   const third = await runner.submit(submission("boundary-3"));
   await waitFor(() => database.getJob(third.job.id)?.status === "failed");
-  assert.equal(database.getSession(third.job.sessionKey)?.providerSessionId, "session-boundary");
+  assert.equal(database.getSession(third.job.sessionKey)?.providerSessionId, null);
+  assert.equal(database.getSession(third.job.sessionKey)?.executionGeneration, 1);
 
   const fourth = await runner.submit(submission("boundary-4"));
   await waitFor(() => database.getJob(fourth.job.id)?.status === "succeeded");
   assert.equal(database.getJob(fourth.job.id)?.output, "recovered");
-  assert.equal(createAttempts, 2);
+  assert.equal(database.getSession(fourth.job.sessionKey)?.providerSessionId, "session-replacement");
+  assert.equal(createAttempts, 3);
   assert.equal(messageAttempts, 2);
   assert(directories.every((value) => value === afterWorktreeFailure.workingDirectory));
 
@@ -511,9 +583,11 @@ test("OpenCode reconciliation aborts an interrupted session and confirms idle st
 test("OpenCode health rejects schema mismatches and unapproved versions before work", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-opencode-health-schema-"));
   let healthResponse: unknown = { healthy: true };
+  let healthStatus = 200;
   const server = createServer((request, response) => {
     const url = new URL(request.url ?? "/", "http://localhost");
     if (request.method === "GET" && url.pathname === "/global/health") {
+      response.statusCode = healthStatus;
       response.setHeader("content-type", "application/json");
       response.end(JSON.stringify(healthResponse));
       return;
@@ -544,6 +618,12 @@ test("OpenCode health rejects schema mismatches and unapproved versions before w
   );
   healthResponse = { healthy: true, version: "1.2.3" };
   assert.deepEqual(await executor.health(), healthResponse);
+  healthStatus = 500;
+  healthResponse = { error: "provider response must not enter logs" };
+  await assert.rejects(executor.health(), (error: unknown) =>
+    error instanceof OpenCodeError && error.code === "OPENCODE_HTTP_ERROR" &&
+    !error.message.includes("provider response must not enter logs")
+  );
 
   await audit.flush();
   const auditText = await readFile(config.storage.auditLogPath, "utf8");

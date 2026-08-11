@@ -392,19 +392,17 @@ export class RunnerDatabase {
     `).run(providerId, providerSessionId, providerId, providerSessionId, now(), sessionKey);
   }
 
-  quarantineSessionExecution(sessionKey: string): void {
-    this.sqlite.prepare(`
-      UPDATE sessions SET provider_session_id = NULL,
-        opencode_session_id = CASE WHEN provider_id = 'opencode' THEN NULL ELSE opencode_session_id END,
-        execution_generation = execution_generation + 1,
-        reconciliation_required = 0, updated_at = ?
-      WHERE session_key = ?
-    `).run(now(), sessionKey);
-  }
-
   completeSessionReconciliation(sessionKey: string): void {
     this.sqlite.prepare(`
-      UPDATE sessions SET reconciliation_required = 0, updated_at = ? WHERE session_key = ?
+      UPDATE sessions SET
+        execution_generation = CASE
+          WHEN provider_session_id IS NULL THEN execution_generation
+          ELSE execution_generation + 1
+        END,
+        provider_session_id = NULL,
+        opencode_session_id = CASE WHEN provider_id = 'opencode' THEN NULL ELSE opencode_session_id END,
+        reconciliation_required = 0, updated_at = ?
+      WHERE session_key = ?
     `).run(now(), sessionKey);
   }
 

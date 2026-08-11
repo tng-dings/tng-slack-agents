@@ -16,7 +16,7 @@ The current OpenCode integration is a sensible MVP design for the project's deli
 - The runner provides a durable queue, idempotent ingress, per-session serialization, limits, audit records, and platform-specific delivery.
 - The worker applies a restrictive unattended-execution policy.
 
-Phase 1 now persists execution resources before prompt submission, makes provisioning retryable, cancels active jobs during shutdown, and reconciles or quarantines interrupted remote turns before releasing a session. Phase 2 has added provider-neutral persistence and strict protocol/version gates. The service remains fail-closed until an operator validates and records a real OpenCode version, and the Phase 3 workspace-lifecycle work remains recommended before broader production use.
+Phase 1 now persists execution resources before prompt submission, makes provisioning retryable, cancels active jobs during shutdown, and blocks interrupted remote turns until reconciliation proves them stopped. Phase 2 has added provider-neutral persistence and strict protocol/version gates. The service remains fail-closed until an operator validates and records a real OpenCode version, and the Phase 3 workspace-lifecycle work remains recommended before broader production use.
 
 BBX has a materially more mature general-purpose agent runtime, but its OpenCode path uses the generic Agent Client Protocol (ACP) adapter and is not included in BBX's real-provider test matrix. BBX also supports Windows only through WSL2, while this project intentionally supports native Windows services, DPAPI, and Windows virtual service identities. Do not replace the runner wholesale with BBX.
 
@@ -150,7 +150,7 @@ Required change:
 - Call the OpenCode abort endpoint for every interrupted provider session.
 - Verify that the session is idle, or wait for a bounded reconciliation timeout, before releasing the session for later jobs.
 - Audit reconciliation attempts and outcomes.
-- If OpenCode cannot prove idle state, quarantine the session and require a new provider session rather than reusing ambiguous context.
+- Keep the session queue blocked until OpenCode proves the old turn stopped, then discard that provider session before creating a replacement.
 
 The invariant should be:
 
@@ -304,15 +304,15 @@ Phase 1 implementation notes (completed August 2026):
 
 - `OpenCodeExecutor` now separates `prepareSession()` from `executeTurn()`. Preparation reports the verified worktree to `AgentRunner`, which persists it before OpenCode session lookup or creation. The returned OpenCode session ID is then persisted before event subscription or prompt submission.
 - Worktree preparation recovers the deterministic path only after verifying that it is a Git worktree owned by the configured source repository. OpenCode preparation uses a generation-derived title marker and the session-list API to recover a session whose create response was lost before SQLite could record its ID.
-- The additive, idempotent migration adds `execution_generation` and `reconciliation_required` to `sessions`. Existing OpenCode, working-directory, job, integration, usage, and audit columns are retained. Quarantine clears only the ambiguous OpenCode session ID, increments the generation, and preserves the worktree and all existing data.
-- Interrupted and failed turns durably require reconciliation. Queue claiming excludes those sessions until OpenCode abort succeeds and `/session/status` proves idle, or the old provider session is quarantined. The durable flag survives another runner restart.
-- Graceful shutdown marks active sessions for reconciliation before aborting their controllers with `RUNNER_SHUTDOWN`, waits up to 10 seconds for settlement, and leaves the durable reconciliation flag in place if confirmation cannot finish.
+- The additive, idempotent migration adds `execution_generation` and `reconciliation_required` to `sessions`. Existing OpenCode, working-directory, job, integration, usage, and audit columns are retained. One durable flag blocks the queue while the old provider identity remains available for abort/status checks.
+- Successful reconciliation always clears the interrupted provider identity and increments the execution generation once; the next job creates or recovers a fresh provider session while reusing the verified worktree. Failed runtime attempts retry after one second. An unresolved startup attempt fails startup visibly with `SESSION_RECONCILIATION_REQUIRED`.
+- Graceful shutdown cancels all claimed jobs but marks reconciliation only for turns that reached `executeTurn()`. It waits up to 10 seconds for settlement and leaves the durable flag in place if an active provider turn cannot be confirmed stopped.
 - Provisioning, abort, reconciliation, quarantine, and bounded-shutdown outcomes are audited through the existing redacting and bounded audit logger.
 
 Deferred assumptions and intentionally limited scope:
 
-- Startup uses a parallel, bounded global reconciliation barrier before queue polling starts. This is stricter than releasing unrelated sessions individually and keeps startup behavior simple; per-session progressive release can be considered later without changing the durable invariant.
-- OpenCode reconciliation has a five-second bound. After a successful abort, an absent `/session/status` entry or an explicit `idle` entry is treated as idle; `busy`, `retry`, malformed data, transport failure, or timeout causes quarantine. This follows the current OpenCode status-map behavior and fails closed when idle cannot be established.
+- Startup uses a parallel, bounded global reconciliation barrier before queue polling starts and fails if any session remains unresolved. OpenCode reconciliation has a five-second bound. After a successful abort, an absent `/session/status` entry or an explicit `idle` entry is treated as idle; `busy`, `retry`, malformed data, transport failure, or timeout keeps the durable queue block in place.
+- `npm run status` is the only PoC operator surface. It opens SQLite read-only and exposes bounded job counts and hashed blocked-session references; there is no administration API or manual force-release path.
 - If delayed OpenCode session-list visibility ever creates multiple sessions with the same ownership marker, the newest matching session is recovered and older sessions are preserved. Safe orphan discovery and cleanup remain Phase 3 work; Phase 1 performs no destructive orphan sweep.
 - The legacy monolithic `Executor.execute()` branch was retained during Phase 1 and removed in Phase 2. All executors now implement the split preparation/turn contract.
 - Workspace lifecycle expansion and ACP remain deferred to their documented later phases.

@@ -33,6 +33,7 @@ export type OpenCodeEvent =
   | { kind: "tool"; sessionId: string; part: OpenCodePart }
   | { kind: "usage"; sessionId: string; usage: Usage }
   | { kind: "permission"; sessionId: string; permissionId: string }
+  | { kind: "error"; sessionId?: string }
   | { kind: "ignored"; eventType: string }
   | { kind: "unknown"; eventType: string };
 
@@ -72,6 +73,13 @@ function usage(value: unknown, schema: string, path: string): Usage {
     inputTokens: finite(tokens.input, schema, `${path}.tokens.input`),
     outputTokens: finite(tokens.output, schema, `${path}.tokens.output`),
   };
+}
+
+function hasProviderError(value: unknown, schema: string, path: string): boolean {
+  if (value === undefined) return false;
+  const error = object(value, schema, path);
+  string(error.name, schema, `${path}.name`);
+  return true;
 }
 
 export function parseHealth(value: unknown): { healthy: true; version: string } {
@@ -128,10 +136,14 @@ export function parseMessage(value: unknown): OpenCodeMessage {
   const schema = "message response";
   const result = object(value, schema, "$");
   if (!Array.isArray(result.parts)) mismatch(schema, "$.parts", "an array");
+  const info = object(result.info, schema, "$.info");
+  if (hasProviderError(info.error, schema, "$.info.error")) {
+    throw new OpenCodeError("OpenCode assistant message reported an error", "OPENCODE_PROVIDER_ERROR");
+  }
   return {
-    info: object(result.info, schema, "$.info"),
+    info,
     parts: result.parts.map((item, index) => part(item, schema, `$.parts[${index}]`)),
-    usage: usage(result.info, schema, "$.info"),
+    usage: usage(info, schema, "$.info"),
   };
 }
 
@@ -165,7 +177,6 @@ const ignoredEventTypes = new Set([
   "session.idle",
   "session.compacted",
   "session.diff",
-  "session.error",
   "message.removed",
   "message.part.removed",
   "permission.replied",
@@ -182,10 +193,19 @@ export function parseEvent(value: unknown): OpenCodeEvent {
   const event = object(value, schema, "$");
   const eventType = string(event.type, schema, "$.type");
   if (ignoredEventTypes.has(eventType)) return { kind: "ignored", eventType };
-  if (!["message.part.updated", "message.updated", "permission.updated"].includes(eventType)) {
+  if (!["message.part.updated", "message.updated", "permission.updated", "session.error"].includes(eventType)) {
     return { kind: "unknown", eventType };
   }
   const properties = object(event.properties, schema, "$.properties");
+  if (eventType === "session.error") {
+    hasProviderError(properties.error, schema, "$.properties.error");
+    return {
+      kind: "error",
+      ...(properties.sessionID === undefined
+        ? {}
+        : { sessionId: string(properties.sessionID, schema, "$.properties.sessionID") }),
+    };
+  }
   if (eventType === "message.part.updated") {
     const parsedPart = part(properties.part, schema, "$.properties.part");
     const sessionId = string(parsedPart.sessionID, schema, "$.properties.part.sessionID");
@@ -200,9 +220,9 @@ export function parseEvent(value: unknown): OpenCodeEvent {
     const info = object(properties.info, schema, "$.properties.info");
     const sessionId = string(info.sessionID, schema, "$.properties.info.sessionID");
     const role = string(info.role, schema, "$.properties.info.role");
-    return role === "assistant"
-      ? { kind: "usage", sessionId, usage: usage(info, schema, "$.properties.info") }
-      : { kind: "ignored", eventType };
+    if (role !== "assistant") return { kind: "ignored", eventType };
+    if (hasProviderError(info.error, schema, "$.properties.info.error")) return { kind: "error", sessionId };
+    return { kind: "usage", sessionId, usage: usage(info, schema, "$.properties.info") };
   }
   const permission = properties.permission === undefined
     ? properties

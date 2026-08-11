@@ -50,7 +50,7 @@ The durable queue and executor remain the foundation. The remaining HTTPS work i
 Completed in the August 2026 runtime-hardening milestone:
 
 - [x] Persist the verified worktree and provider session before prompt submission, with idempotent recovery after failures and restarts.
-- [x] Cancel active controllers during bounded graceful shutdown and durably reconcile or quarantine interrupted remote sessions before releasing queued work.
+- [x] Cancel claimed jobs during bounded graceful shutdown, reconcile only turns that reached the provider, and keep affected queues blocked until the old provider session is stopped and retired.
 - [x] Add provider-neutral `provider_id` and `provider_session_id` persistence while retaining and dual-writing the legacy OpenCode column for rollback compatibility.
 - [x] Remove OpenCode-specific identities and the legacy monolithic executor path from the generic runner contract.
 - [x] Strictly validate every consumed OpenCode REST response and SSE event, with bounded value-free audits for schema mismatches and unknown event types.

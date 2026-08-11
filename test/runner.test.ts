@@ -10,8 +10,42 @@ import { RunnerDatabase } from "../src/database.js";
 import { AuthorizationError } from "../src/errors.js";
 import { AgentRunner } from "../src/runner.js";
 import { SlackJobReporter } from "../src/slack.js";
+import { readRunnerStatus } from "../src/status.js";
 import type { Attachment, Executor, JobRecord, JobReporter } from "../src/types.js";
 import { testAuthorizationPolicy, testConfig, testExecutor, waitFor } from "./helpers.js";
+
+test("runner status is read-only, bounded, and hides session identities", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-status-"));
+  const config = testConfig(root);
+  const database = new RunnerDatabase(config.storage.databasePath);
+  const job = database.insertJob("status-job", {
+    integration: "slack",
+    sourceEventId: "status-event",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "status-thread",
+    actorId: "U_ALLOWED",
+    prompt: "status",
+  });
+  assert.deepEqual(readRunnerStatus(config.storage.databasePath), {
+    state: "queued",
+    ready: true,
+    jobs: { queued: 1, running: 0, succeeded: 0, failed: 0, timed_out: 0, rejected: 0 },
+    reconciliation: { blockedSessionCount: 0, sessionReferences: [], referencesTruncated: false },
+  });
+  assert.equal(database.claimNextJob(1, 1)?.id, job.id);
+  database.requireSessionReconciliation(job.sessionKey);
+  const blocked = readRunnerStatus(config.storage.databasePath);
+  assert.equal(blocked.state, "blocked");
+  assert.equal(blocked.ready, false);
+  assert.equal(blocked.jobs.running, 1);
+  assert.equal(blocked.reconciliation.blockedSessionCount, 1);
+  assert.equal(blocked.reconciliation.referencesTruncated, false);
+  assert.match(blocked.reconciliation.sessionReferences[0]!, /^[0-9a-f]{12}$/);
+  assert.doesNotMatch(JSON.stringify(blocked), new RegExp(job.sessionKey.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
+  database.close();
+  await rm(root, { recursive: true, force: true });
+});
 
 test("runner persists jobs and sessions, enforces authz, accounts usage, and redacts audits", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-control-"));
@@ -184,6 +218,52 @@ test("graceful shutdown aborts active job controllers and waits for settlement",
   await rm(root, { recursive: true, force: true });
 });
 
+test("graceful shutdown cancels a claimed job before delivery setup completes", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-shutdown-delivery-"));
+  const config = testConfig(root);
+  const database = new RunnerDatabase(config.storage.databasePath);
+  const audit = new AuditLogger(config.storage.auditLogPath, database);
+  let releaseDelivery!: () => void;
+  const deliveryGate = new Promise<void>((resolve) => { releaseDelivery = resolve; });
+  let preparationStarted = false;
+  let failedMessage = "";
+  const executor: Executor = {
+    prepareSession: async () => {
+      preparationStarted = true;
+      throw new Error("must not prepare after shutdown");
+    },
+    executeTurn: async () => Promise.reject(new Error("must not execute after shutdown")),
+  };
+  const runner = new AgentRunner(config, testAuthorizationPolicy(config), database, executor, audit, () => ({
+    start: async () => deliveryGate,
+    append: async () => undefined,
+    succeed: async () => undefined,
+    fail: async (message) => { failedMessage = message; },
+  }));
+  await runner.start();
+  const submitting = runner.submit({
+    integration: "slack",
+    sourceEventId: "shutdown-delivery-event",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "shutdown-delivery-thread",
+    actorId: "U_ALLOWED",
+    prompt: "wait for delivery",
+  });
+  await waitFor(() => database.countRunning() === 1);
+  const job = database.getJobBySourceEvent("slack", "shutdown-delivery-event")!;
+  const stopping = runner.stop();
+  releaseDelivery();
+  await submitting;
+  await stopping;
+  assert.equal(preparationStarted, false);
+  assert.equal(database.getJob(job.id)?.status, "failed");
+  assert.equal(database.getSession(job.sessionKey)?.reconciliationRequired, false);
+  assert.match(failedMessage, new RegExp(job.id));
+  database.close();
+  await rm(root, { recursive: true, force: true });
+});
+
 test("startup reconciliation blocks a session until abort confirms it stopped", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-reconcile-stopped-"));
   const config = testConfig(root);
@@ -224,9 +304,10 @@ test("startup reconciliation blocks a session until abort confirms it stopped", 
       await gate;
     },
     prepareSession: async (_job, session, callbacks) => {
-      assert.equal(session.providerSessionId, "old-provider-session");
+      assert.equal(session.providerSessionId, null);
+      assert.equal(session.executionGeneration, 1);
       await callbacks.onWorkingDirectory(session.workingDirectory!);
-      return { providerId: session.providerId, providerSessionId: session.providerSessionId!, workingDirectory: session.workingDirectory! };
+      return { providerId: session.providerId, providerSessionId: "replacement-provider-session", workingDirectory: session.workingDirectory! };
     },
     executeTurn: async () => {
       turnStarted = true;
@@ -249,7 +330,8 @@ test("startup reconciliation blocks a session until abort confirms it stopped", 
   await starting;
   await waitFor(() => reopened.getJob(queued.id)?.status === "succeeded");
   assert.equal(turnStarted, true);
-  assert.equal(reopened.getSession(running.sessionKey)?.providerSessionId, "old-provider-session");
+  assert.equal(reopened.getSession(running.sessionKey)?.providerSessionId, "replacement-provider-session");
+  assert.equal(reopened.getSession(running.sessionKey)?.executionGeneration, 1);
   assert.equal(reopened.getSession(running.sessionKey)?.reconciliationRequired, false);
   await runner.stop();
   reopened.close();
@@ -295,12 +377,14 @@ test("durable reconciliation state survives a second restart", async () => {
   await runner.start();
   assert.equal(reconciled, true);
   assert.equal(reopened.getSession(running.sessionKey)?.reconciliationRequired, false);
+  assert.equal(reopened.getSession(running.sessionKey)?.providerSessionId, null);
+  assert.equal(reopened.getSession(running.sessionKey)?.executionGeneration, 1);
   await runner.stop();
   reopened.close();
   await rm(root, { recursive: true, force: true });
 });
 
-test("failed startup reconciliation quarantines the provider session before queued work", async () => {
+test("failed startup reconciliation fails visibly and preserves queued work for a later restart", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-reconcile-quarantine-"));
   const config = testConfig(root);
   const database = new RunnerDatabase(config.storage.databasePath);
@@ -328,19 +412,14 @@ test("failed startup reconciliation quarantines the provider session before queu
 
   const reopened = new RunnerDatabase(config.storage.databasePath);
   const audit = new AuditLogger(config.storage.auditLogPath, reopened);
-  let sawQuarantinedPreparation = false;
-  let providerPersistedBeforeTurn = false;
+  let preparationStarted = false;
   const executor: Executor = {
     reconcileSession: async () => { throw new Error("abort endpoint unavailable"); },
-    prepareSession: async (_job, session, callbacks) => {
-      sawQuarantinedPreparation = session.providerSessionId === null && session.executionGeneration === 1;
-      await callbacks.onWorkingDirectory(session.workingDirectory!);
-      return { providerId: "opencode", providerSessionId: "replacement-provider-session", workingDirectory: session.workingDirectory! };
+    prepareSession: async () => {
+      preparationStarted = true;
+      throw new Error("must remain blocked");
     },
-    executeTurn: async (job) => {
-      providerPersistedBeforeTurn = reopened.getSession(job.sessionKey)?.providerSessionId === "replacement-provider-session";
-      return { output: "replacement complete", usage: { cost: 0, inputTokens: 1, outputTokens: 1 } };
-    },
+    executeTurn: async () => Promise.reject(new Error("must remain blocked")),
   };
   const runner = new AgentRunner(config, testAuthorizationPolicy(config), reopened, executor, audit, () => ({
     start: async () => undefined,
@@ -348,18 +427,124 @@ test("failed startup reconciliation quarantines the provider session before queu
     succeed: async () => undefined,
     fail: async () => undefined,
   }));
-  await runner.start();
-  await waitFor(() => reopened.getJob(queued.id)?.status === "succeeded");
-  assert.equal(sawQuarantinedPreparation, true);
-  assert.equal(providerPersistedBeforeTurn, true);
-  assert.equal(reopened.getSession(running.sessionKey)?.providerSessionId, "replacement-provider-session");
-  assert.equal(reopened.getSession(running.sessionKey)?.executionGeneration, 1);
-  assert.equal(reopened.getSession(running.sessionKey)?.reconciliationRequired, false);
+  await assert.rejects(
+    runner.start(),
+    (error: unknown) => error instanceof Error &&
+      (error as { code?: string }).code === "SESSION_RECONCILIATION_REQUIRED",
+  );
+  assert.equal(reopened.getJob(queued.id)?.status, "queued");
+  assert.equal(preparationStarted, false);
+  assert.equal(reopened.getSession(running.sessionKey)?.providerSessionId, "ambiguous-provider-session");
+  assert.equal(reopened.getSession(running.sessionKey)?.executionGeneration, 0);
+  assert.equal(reopened.getSession(running.sessionKey)?.reconciliationRequired, true);
   await runner.stop();
+  reopened.close();
+
+  const recovered = new RunnerDatabase(config.storage.databasePath);
+  const recoveredAudit = new AuditLogger(config.storage.auditLogPath, recovered);
+  let sawReplacementPreparation = false;
+  const recoveredExecutor: Executor = {
+    reconcileSession: async (session) => {
+      assert.equal(session.providerSessionId, "ambiguous-provider-session");
+    },
+    prepareSession: async (_job, session, callbacks) => {
+      sawReplacementPreparation = session.providerSessionId === null && session.executionGeneration === 1;
+      await callbacks.onWorkingDirectory(session.workingDirectory!);
+      return { providerId: "opencode", providerSessionId: "replacement-provider-session", workingDirectory: session.workingDirectory! };
+    },
+    executeTurn: async () => ({
+      output: "replacement complete",
+      usage: { cost: 0, inputTokens: 1, outputTokens: 1 },
+    }),
+  };
+  const recoveredRunner = new AgentRunner(
+    config,
+    testAuthorizationPolicy(config),
+    recovered,
+    recoveredExecutor,
+    recoveredAudit,
+    () => ({
+      start: async () => undefined,
+      append: async () => undefined,
+      succeed: async () => undefined,
+      fail: async () => undefined,
+    }),
+  );
+  await recoveredRunner.start();
+  await waitFor(() => recovered.getJob(queued.id)?.status === "succeeded");
+  assert.equal(sawReplacementPreparation, true);
+  assert.equal(recovered.getSession(running.sessionKey)?.providerSessionId, "replacement-provider-session");
+  assert.equal(recovered.getSession(running.sessionKey)?.reconciliationRequired, false);
+  assert.equal(recovered.getSession(running.sessionKey)?.executionGeneration, 1);
+  await recoveredRunner.stop();
 
   const auditText = await readFile(config.storage.auditLogPath, "utf8");
   assert.match(auditText, /"outcome":"quarantined"/);
-  reopened.close();
+  assert.match(auditText, /"outcome":"stopped"/);
+  recovered.close();
+  await rm(root, { recursive: true, force: true });
+});
+
+test("runtime reconciliation retries release queued work after a transient provider failure", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-reconcile-retry-"));
+  const config = testConfig(root);
+  const database = new RunnerDatabase(config.storage.databasePath);
+  const audit = new AuditLogger(config.storage.auditLogPath, database);
+  let turns = 0;
+  let reconciliationAttempts = 0;
+  const executor: Executor = {
+    reconcileSession: async () => {
+      reconciliationAttempts += 1;
+      if (reconciliationAttempts === 1) throw new Error("temporary provider outage");
+    },
+    prepareSession: async (_job, session, callbacks) => {
+      const workingDirectory = session.workingDirectory ?? path.join(root, "worktree");
+      await callbacks.onWorkingDirectory(workingDirectory);
+      return {
+        providerId: session.providerId,
+        providerSessionId: session.providerSessionId ?? `provider-session-${session.executionGeneration}`,
+        workingDirectory,
+      };
+    },
+    executeTurn: async () => {
+      turns += 1;
+      if (turns === 1) throw new Error("provider turn failed");
+      return { output: "recovered", usage: { cost: 0, inputTokens: 1, outputTokens: 1 } };
+    },
+  };
+  const runner = new AgentRunner(config, testAuthorizationPolicy(config), database, executor, audit, () => ({
+    start: async () => undefined,
+    append: async () => undefined,
+    succeed: async () => undefined,
+    fail: async () => undefined,
+  }));
+  await runner.start();
+  const first = await runner.submit({
+    integration: "slack",
+    sourceEventId: "reconcile-retry-first",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "reconcile-retry-thread",
+    actorId: "U_ALLOWED",
+    prompt: "fail once",
+  });
+  await waitFor(() => database.getJob(first.job.id)?.status === "failed");
+  assert.equal(database.getSession(first.job.sessionKey)?.reconciliationRequired, true);
+  const second = await runner.submit({
+    integration: "slack",
+    sourceEventId: "reconcile-retry-second",
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "reconcile-retry-thread",
+    actorId: "U_ALLOWED",
+    prompt: "run after reconciliation",
+  });
+  await waitFor(() => database.getJob(second.job.id)?.status === "succeeded", 3_000);
+  assert.equal(reconciliationAttempts, 2);
+  assert.equal(database.getSession(first.job.sessionKey)?.reconciliationRequired, false);
+  assert.equal(database.getSession(first.job.sessionKey)?.executionGeneration, 1);
+  await runner.stop();
+  database.close();
   await rm(root, { recursive: true, force: true });
 });
 

@@ -13,6 +13,7 @@
     "doctor": "tsx src/cli/doctor.ts",
     "discord:register": "tsx src/cli/register-discord.ts",
     "start": "node dist/src/index.js",
+    "status": "tsx src/cli/status.ts",
     "smoke": "tsx src/cli/smoke.ts",
     "security:audit": "npm audit --audit-level=high",
     "test": "npm run build && node --test --test-isolation=none --test-concurrency=1 dist/test/discord.test.js dist/test/discord-http.test.js dist/test/edge-hardening.test.js dist/test/opencode.test.js dist/test/reporter-routing.test.js dist/test/runner.test.js dist/test/security.test.js dist/test/slack.test.js dist/test/slack-http.test.js"
