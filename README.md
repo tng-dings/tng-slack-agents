@@ -31,26 +31,61 @@ This service accepts allowlisted Slack direct messages and Discord agent-thread 
 
 OpenCode officially recommends WSL for the best Windows compatibility, but this MVP intentionally supports native Windows. The executor interface allows a later WSL or remote-worker implementation without changing Slack or queue code.
 
-## Manual OpenCode milestone
+## Interactive Windows: two-terminal setup
 
 1. Run `npm install`.
 2. Copy `config.example.json` to the ignored `config.json` and set `openCode.workingRepository` to a disposable Git repository.
 3. Run `opencode --version`, complete the compatibility checks in the [OpenCode upgrade runbook](docs/opencode-upgrade-runbook.md), and replace the `openCode.approvedVersions` placeholder with that exact validated version. An empty or non-matching allowlist prevents the runner from accepting work.
-4. Start OpenCode in one PowerShell window with the same password used by the client:
 
-   ```powershell
-   $env:OPENCODE_SERVER_PASSWORD = '<a-long-random-password>'
-   opencode serve --hostname 127.0.0.1 --port 4096
-   ```
+OpenCode exposes an HTTP API used to run model turns and work in the configured repository. The server is bound to the IPv4 loopback address so it is not directly reachable from the LAN, and a password authenticates the AgentRunner client against other local callers. Use one unique password in both terminals. The password authenticates the loopback connection; it does not encrypt HTTP traffic or protect a machine that is already compromised.
 
-5. In a second window, set only the client-side password and run the hardcoded smoke prompt:
+### Terminal 1 — OpenCode worker
 
-   ```powershell
-   $env:OPENCODE_SERVER_PASSWORD = '<the-same-password>'
-   npm run smoke
-   ```
+Open the first PowerShell window, enter a strong password through the masked prompt, and start OpenCode. Do not use `0.0.0.0` or a LAN address.
 
-   An optional prompt can be supplied after `--`, for example `npm run smoke -- "Review the tests"`.
+```powershell
+Set-Location C:\path\to\this\repository
+
+$secret = Read-Host "Choose an OpenCode server password" -AsSecureString
+$env:OPENCODE_SERVER_PASSWORD = [System.Net.NetworkCredential]::new("", $secret).Password
+Remove-Variable secret
+
+opencode serve --hostname 127.0.0.1 --port 4096
+```
+
+Leave Terminal 1 running. Stop it with `Ctrl+C` after the gateway has stopped.
+
+### Terminal 2 — AgentRunner client
+
+Open a second PowerShell window. The helper below reads secrets without putting their values in PowerShell command history. Enter the same OpenCode password used in Terminal 1.
+
+```powershell
+Set-Location C:\path\to\this\repository
+
+function Set-ProcessSecret([string]$Name) {
+    $secure = Read-Host $Name -AsSecureString
+    $value = [System.Net.NetworkCredential]::new("", $secure).Password
+    [Environment]::SetEnvironmentVariable($Name, $value, "Process")
+    $value = $null
+}
+
+Set-ProcessSecret OPENCODE_SERVER_PASSWORD
+```
+
+Confirm that OpenCode is listening only on loopback:
+
+```powershell
+Get-NetTCPConnection -LocalPort 4096 -State Listen |
+    Select-Object LocalAddress, LocalPort, OwningProcess
+```
+
+The expected `LocalAddress` is exactly `127.0.0.1`. Stop OpenCode if the listener reports `0.0.0.0`, `::`, or a LAN address. For an OpenCode-only validation, run the hardcoded smoke prompt here. If you are preparing Slack or Discord, continue to the appropriate section below; its command sequence runs this smoke test once after `doctor`.
+
+```powershell
+npm run smoke
+```
+
+An optional prompt can be supplied after `--`, for example `npm run smoke -- "Review the tests"`. Keep Terminal 2 open and retain the `Set-ProcessSecret` helper for the integration-specific credentials below. Process-scoped secrets disappear when this terminal closes.
 
 The smoke command performs the server health and exact-version approval check, creates/reuses its persistent session and worktree, consumes strictly validated SSE events, prints the response, and records usage and tool events.
 
@@ -62,29 +97,35 @@ npm run status
 
 The command opens SQLite read-only, prints job counts and at most 20 hashed blocked-session references, and exits nonzero when reconciliation blocks startup.
 
-## Slack development run
+## Slack Socket Mode development run
 
 Import [slack/manifest.json](slack/manifest.json) when creating the internal app, install it after approval, and obtain an `xoxb-` bot token plus an `xapp-` app-level token with `connections:write`.
 
+In `config.json`, keep `slack.ingress` set to `"socket"` and configure the exact app, workspace, and tester IDs. Then, in Terminal 2 from the setup above, enter the Slack tokens through masked prompts and start the gateway:
+
 ```powershell
-$env:OPENCODE_SERVER_PASSWORD = '<server-password>'
-$env:SLACK_BOT_TOKEN = 'xoxb-...'
-$env:SLACK_APP_TOKEN = 'xapp-...'
+Set-ProcessSecret SLACK_BOT_TOKEN
+Set-ProcessSecret SLACK_APP_TOKEN
+Remove-Item Function:\Set-ProcessSecret
+
 npm run doctor
+npm run smoke
 npm run dev
 ```
 
-Only exact workspace IDs in `slack.allowedWorkspaceIds` and user IDs in `slack.allowedUserIds` can enqueue work. Start with a disposable repository and a single allowlisted tester.
+Enter the `xoxb-...` value for `SLACK_BOT_TOKEN` and the `xapp-...` value for `SLACK_APP_TOKEN`; do not paste either value into source files or ordinary Slack messages. `npm run dev` remains in the foreground and connects to Slack over an outbound WebSocket. Keep both terminals open while testing, stop the gateway with `Ctrl+C`, and then stop OpenCode. Only exact workspace IDs in `slack.allowedWorkspaceIds` and user IDs in `slack.allowedUserIds` can enqueue work. Start with a disposable repository and a single allowlisted tester.
 
 ## Slack Events API development run
 
 Set `slack.ingress` to `"events-api"`, set `slack.appId` to the exact Slack application ID, keep `slack.http.host` at the reviewed `127.0.0.1` address, and configure `port`, `eventsPath`, and `healthPath`. Use [slack/manifest.events-api.json](slack/manifest.events-api.json) after replacing its example Request URL with the managed public TLS URL. The public edge must forward only the events and health paths to the private Node listener.
 
 ```powershell
-$env:OPENCODE_SERVER_PASSWORD = '<server-password>'
-$env:SLACK_BOT_TOKEN = 'xoxb-...'
-$env:SLACK_SIGNING_SECRET = '<signing-secret>'
+Set-ProcessSecret SLACK_BOT_TOKEN
+Set-ProcessSecret SLACK_SIGNING_SECRET
+Remove-Item Function:\Set-ProcessSecret
+
 npm run doctor
+npm run smoke
 npm run dev
 ```
 
@@ -99,10 +140,12 @@ Production Events API deployments must follow the [public endpoint hardening run
 Set `discord.enabled` to `true`, set `discord.ingress` to `"gateway"`, and configure the exact application, guild, and user IDs. Enable the Guilds, Guild Messages, and Message Content intents for the bot. The command is `/agent prompt:<required> attachment:<optional image>` and is accepted only in a normal guild channel.
 
 ```powershell
-$env:OPENCODE_SERVER_PASSWORD = '<server-password>'
-$env:DISCORD_BOT_TOKEN = '<bot-token>'
+Set-ProcessSecret DISCORD_BOT_TOKEN
+Remove-Item Function:\Set-ProcessSecret
+
 npm run discord:register
 npm run doctor
+npm run smoke
 npm run dev
 ```
 
