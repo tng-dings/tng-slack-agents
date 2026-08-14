@@ -9,3 +9,5 @@ config.json
 service/*.exe
 service/*.wrapper.log
 
+.env
+data/
