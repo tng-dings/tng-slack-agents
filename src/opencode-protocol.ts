@@ -54,6 +54,11 @@ function string(value: unknown, schema: string, path: string): string {
   return value;
 }
 
+function text(value: unknown, schema: string, path: string): string {
+  if (typeof value !== "string") return mismatch(schema, path, "a string");
+  return value;
+}
+
 function finite(value: unknown, schema: string, path: string): number {
   if (typeof value !== "number" || !Number.isFinite(value)) return mismatch(schema, path, "a finite number");
   return value;
@@ -119,7 +124,9 @@ export function parseBoolean(value: unknown, schema: string): boolean {
 function part(value: unknown, schema: string, path: string): OpenCodePart {
   const result = object(value, schema, path);
   const type = string(result.type, schema, `${path}.type`);
-  if (type === "text") string(result.text, schema, `${path}.text`);
+  // OpenCode publishes a text part with an empty string when streaming starts,
+  // before later message.part.updated events append deltas.
+  if (type === "text") text(result.text, schema, `${path}.text`);
   if (type === "tool") {
     string(result.tool, schema, `${path}.tool`);
     string(result.callID, schema, `${path}.callID`);
@@ -211,7 +218,7 @@ export function parseEvent(value: unknown): OpenCodeEvent {
     const sessionId = string(parsedPart.sessionID, schema, "$.properties.part.sessionID");
     if (parsedPart.type === "text") {
       if (properties.delta === undefined) return { kind: "ignored", eventType };
-      return { kind: "text", sessionId, delta: string(properties.delta, schema, "$.properties.delta") };
+      return { kind: "text", sessionId, delta: text(properties.delta, schema, "$.properties.delta") };
     }
     if (parsedPart.type === "tool") return { kind: "tool", sessionId, part: parsedPart };
     return { kind: "ignored", eventType };

@@ -376,6 +376,10 @@ export class OpenCodeExecutor implements Executor {
     } catch (error) {
       if (!signal.aborted) throw error;
     } finally {
+      // Releasing a reader does not cancel a still-open SSE response. OpenCode
+      // deliberately keeps /event open, so leaving the body uncancelled keeps
+      // its TCP socket (and a short-lived CLI process) alive after a turn.
+      await reader.cancel().catch(() => undefined);
       reader.releaseLock();
     }
   }

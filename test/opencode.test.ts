@@ -56,6 +56,37 @@ test("OpenCode protocol rejects error-bearing assistant messages and surfaces se
   );
 });
 
+test("OpenCode protocol accepts the empty text part used to initialize streaming", () => {
+  const part = {
+    id: "part-1",
+    sessionID: "streaming-session",
+    messageID: "message-1",
+    type: "text",
+    text: "",
+  };
+  assert.deepEqual(
+    parseEvent({
+      type: "message.part.updated",
+      properties: { part },
+    }),
+    { kind: "ignored", eventType: "message.part.updated" },
+  );
+  assert.deepEqual(
+    parseEvent({
+      type: "message.part.updated",
+      properties: { part, delta: "" },
+    }),
+    { kind: "text", sessionId: "streaming-session", delta: "" },
+  );
+  assert.equal(
+    parseMessage({
+      info: { cost: 0, tokens: { input: 0, output: 0 } },
+      parts: [part],
+    }).parts[0]?.text,
+    "",
+  );
+});
+
 test("OpenCode cleanup removes a known worktree without a provider session", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-opencode-cleanup-"));
   const config = testConfig(root);
@@ -352,6 +383,8 @@ test("OpenCode executor creates a worktree, streams events, and returns usage", 
   assert(directories.some((directory) => directory.includes("worktrees")));
   assert.match(prepared.workingDirectory, /worktrees/);
   assert.match(await readFile(path.join(prepared.workingDirectory, "README.md"), "utf8"), /fixture/);
+  await waitFor(() => subscribers.size === 0);
+  assert.equal(subscribers.size, 0, "completed turns must close their SSE subscription");
   await executor.cleanup({
     ...database.getSession(job.sessionKey)!,
     providerId: prepared.providerId,
