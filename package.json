@@ -23,7 +23,7 @@
     "@discordjs/rest": "^2.6.3",
     "@discordjs/ws": "^2.0.4",
     "@slack/bolt": "^4.7.3",
-    "@slack/web-api": "^7.19.0",
+    "@slack/web-api": "^8.0.0",
     "discord-api-types": "^0.38.53",
     "discord-interactions": "^4.4.0"
   },
