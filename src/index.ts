@@ -1,4 +1,5 @@
 import { AuditLogger } from "./audit.js";
+import { ClaudeCodeExecutor } from "./claude-code.js";
 import { IntegrationAuthorizationPolicy, loadConfig, loadSecrets } from "./config.js";
 import { RunnerDatabase } from "./database.js";
 import { DiscordGateway } from "./discord.js";
@@ -7,6 +8,7 @@ import { OpenCodeExecutor } from "./opencode.js";
 import { AgentRunner } from "./runner.js";
 import { SlackGateway } from "./slack.js";
 import { WorkspaceManager } from "./workspace.js";
+import type { Executor } from "./types.js";
 
 async function main(): Promise<void> {
   const config = await loadConfig();
@@ -19,14 +21,16 @@ async function main(): Promise<void> {
     secrets.slackAppToken ?? "",
     secrets.slackSigningSecret ?? "",
   ], config.limits.maxAuditEventCharacters);
-  const workspaces = new WorkspaceManager(config.openCode.workingRepository, config.storage.worktreeRoot);
-  const executor = new OpenCodeExecutor(
-    config.openCode,
-    secrets.openCodePassword,
-    workspaces,
-    audit,
-    config.limits.maxOutputCharacters + 64_000,
-  );
+  const workspaces = new WorkspaceManager(config.workingRepository, config.storage.worktreeRoot);
+  const executor: Executor = config.executor === "opencode"
+    ? new OpenCodeExecutor(
+        config.openCode,
+        secrets.openCodePassword,
+        workspaces,
+        audit,
+        config.limits.maxOutputCharacters + 64_000,
+      )
+    : new ClaudeCodeExecutor(config.claudeCode, workspaces);
   const authorization = new IntegrationAuthorizationPolicy(config.integrations);
   const slack = config.slack.enabled ? new SlackGateway(config, secrets, database) : undefined;
   const discord = config.discord.enabled ? new DiscordGateway(config, secrets, database) : undefined;
@@ -52,9 +56,14 @@ async function main(): Promise<void> {
   process.once("SIGTERM", () => void shutdown("SIGTERM").then(() => process.exit(0)));
 
   try {
-    const health = await executor.health();
-    await audit.log("opencode_version_approved", { version: health.version, approval: "exact_allowlist" });
-    console.log(`OpenCode ${health.version} is healthy and approved.`);
+    if (executor instanceof OpenCodeExecutor) {
+      const health = await executor.health();
+      await audit.log("opencode_version_approved", { version: health.version, approval: "exact_allowlist" });
+      console.log(`OpenCode ${health.version} is healthy and approved.`);
+    } else {
+      await audit.log("executor_selected", { provider: "claude-code" });
+      console.log("Claude Code executor selected.");
+    }
     await runner.start();
     if (slack) {
       await slack.start();

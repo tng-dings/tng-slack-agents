@@ -1,4 +1,5 @@
 {
+  "executor": "opencode",
   "discord": {
     "enabled": false,
     "ingress": "gateway",

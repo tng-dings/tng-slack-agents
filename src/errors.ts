@@ -37,3 +37,9 @@ export class OpenCodeError extends RunnerError {
     super(message, code);
   }
 }
+
+export class ClaudeCodeError extends RunnerError {
+  constructor(message: string, code = "CLAUDE_CODE_ERROR") {
+    super(message, code);
+  }
+}

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
 import type { AuditLogger } from "./audit.js";
-import type { RunnerConfig } from "./config.js";
+import type { OpenCodeConfig } from "./config.js";
 import type {
   ExecutionCallbacks,
   ExecutionResult,
@@ -54,7 +54,7 @@ export class OpenCodeExecutor implements Executor {
   private readonly authorization: string;
 
   constructor(
-    private readonly config: RunnerConfig["openCode"],
+    private readonly config: OpenCodeConfig,
     password: string,
     private readonly workspaces: WorkspaceManager,
     private readonly audit: AuditLogger,

@@ -15,30 +15,40 @@ async function main(): Promise<void> {
   checks.push({
     name: "working repository",
     run: async () => {
-      await access(config.openCode.workingRepository);
+      await access(config.workingRepository);
       const result = await execFileAsync(
         "git",
-        ["-C", config.openCode.workingRepository, "rev-parse", "--verify", "HEAD"],
+        ["-C", config.workingRepository, "rev-parse", "--verify", "HEAD"],
         { env: unprivilegedChildEnvironment() },
       );
       return result.stdout.trim().slice(0, 12);
     },
   });
-  checks.push({
-    name: "OpenCode health and authentication",
-    run: async () => {
-      const authorization = `Basic ${Buffer.from(`${config.openCode.username}:${secrets.openCodePassword}`).toString("base64")}`;
-      const response = await fetch(`${config.openCode.baseUrl}/global/health`, {
-        headers: { authorization },
-        redirect: "error",
-        signal: AbortSignal.timeout(5_000),
-      });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const health = parseHealth(await response.json());
-      assertApprovedOpenCodeVersion(health.version, config.openCode.approvedVersions);
-      return health.version;
-    },
-  });
+  if (config.executor === "opencode") {
+    checks.push({
+      name: "OpenCode health and authentication",
+      run: async () => {
+        const authorization = `Basic ${Buffer.from(`${config.openCode.username}:${secrets.openCodePassword}`).toString("base64")}`;
+        const response = await fetch(`${config.openCode.baseUrl}/global/health`, {
+          headers: { authorization },
+          redirect: "error",
+          signal: AbortSignal.timeout(5_000),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const health = parseHealth(await response.json());
+        assertApprovedOpenCodeVersion(health.version, config.openCode.approvedVersions);
+        return health.version;
+      },
+    });
+  } else {
+    checks.push({
+      name: "Claude Code SDK configuration",
+      run: async () => {
+        if (config.claudeCode.executablePath) await access(config.claudeCode.executablePath);
+        return config.claudeCode.executablePath ?? "SDK bundled executable";
+      },
+    });
+  }
   if (config.slack.enabled) {
     checks.push({
       name: "Slack credential shapes",

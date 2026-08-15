@@ -1,9 +1,11 @@
 import { randomUUID } from "node:crypto";
 import { AuditLogger } from "../audit.js";
+import { ClaudeCodeExecutor } from "../claude-code.js";
 import { loadConfig, loadSecrets } from "../config.js";
 import { RunnerDatabase } from "../database.js";
 import { OpenCodeExecutor } from "../opencode.js";
 import { WorkspaceManager } from "../workspace.js";
+import type { Executor } from "../types.js";
 
 const defaultPrompt = "Inspect this repository, identify the main technology stack, and reply with a concise summary. Do not modify files.";
 
@@ -21,13 +23,16 @@ async function main(): Promise<void> {
     [secrets.openCodePassword],
     config.limits.maxAuditEventCharacters,
   );
-  const executor = new OpenCodeExecutor(
-    config.openCode,
-    secrets.openCodePassword,
-    new WorkspaceManager(config.openCode.workingRepository, config.storage.worktreeRoot),
-    audit,
-    config.limits.maxOutputCharacters + 64_000,
-  );
+  const workspaces = new WorkspaceManager(config.workingRepository, config.storage.worktreeRoot);
+  const executor: Executor = config.executor === "opencode"
+    ? new OpenCodeExecutor(
+        config.openCode,
+        secrets.openCodePassword,
+        workspaces,
+        audit,
+        config.limits.maxOutputCharacters + 64_000,
+      )
+    : new ClaudeCodeExecutor(config.claudeCode, workspaces);
   const prompt = process.argv.slice(2).join(" ").trim() || defaultPrompt;
   const sourceEventId = `local-smoke:${randomUUID()}`;
   const job = database.insertJob(randomUUID(), {
@@ -44,8 +49,12 @@ async function main(): Promise<void> {
   const timeout = setTimeout(() => controller.abort(new Error("Smoke test timed out")), config.limits.jobTimeoutSeconds * 1_000);
   let streamedOutput = "";
   try {
-    const health = await executor.health();
-    console.log(`Connected to OpenCode ${health.version ?? "unknown"}.`);
+    if (executor instanceof OpenCodeExecutor) {
+      const health = await executor.health();
+      console.log(`Connected to OpenCode ${health.version ?? "unknown"}.`);
+    } else {
+      console.log("Using the local Claude Code executor.");
+    }
     const prepared = await executor.prepareSession(
       job,
       session,

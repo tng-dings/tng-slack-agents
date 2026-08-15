@@ -1,8 +1,11 @@
 import { IntegrationAuthorizationPolicy, type RunnerConfig } from "../src/config.js";
 import type { Executor } from "../src/types.js";
+import type { OpenCodeRunnerConfig } from "../src/config.js";
 
-export function testConfig(root: string): RunnerConfig {
+export function testConfig(root: string): OpenCodeRunnerConfig {
   return {
+    executor: "opencode",
+    workingRepository: root,
     integrations: {
       slack: { allowedTenants: ["T1"], allowedActors: ["U_ALLOWED"] },
     },

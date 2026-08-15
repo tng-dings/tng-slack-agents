@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
+import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
 import type { AuthorizationDecision, AuthorizationPolicy, IntegrationId, JobSubmission } from "./types.js";
 
 export interface IntegrationAuthorization {
@@ -33,7 +34,24 @@ export interface DiscordConfig {
   };
 }
 
-export interface RunnerConfig {
+export type ExecutorProvider = "opencode" | "claude-code";
+
+export interface OpenCodeConfig {
+  baseUrl: string;
+  username: string;
+  workingRepository: string;
+  approvedVersions: string[];
+  model?: { providerID: string; modelID: string };
+}
+
+export interface ClaudeCodeConfig {
+  workingRepository: string;
+  model?: string;
+  permissionMode: PermissionMode;
+  executablePath?: string;
+}
+
+interface RunnerConfigBase {
   integrations: Partial<Record<IntegrationId, IntegrationAuthorization>>;
   discord: DiscordConfig;
   slack: {
@@ -58,13 +76,6 @@ export interface RunnerConfig {
       maxConnections: number;
     };
   };
-  openCode: {
-    baseUrl: string;
-    username: string;
-    workingRepository: string;
-    approvedVersions: string[];
-    model?: { providerID: string; modelID: string };
-  };
   limits: {
     maxConcurrentJobsPerUser: number;
     maxConcurrentJobsGlobal: number;
@@ -87,6 +98,22 @@ export interface RunnerConfig {
   };
   queue: { pollIntervalMs: number };
 }
+
+export type OpenCodeRunnerConfig = RunnerConfigBase & {
+  executor: "opencode";
+  workingRepository: string;
+  openCode: OpenCodeConfig;
+  claudeCode?: never;
+};
+
+export type ClaudeCodeRunnerConfig = RunnerConfigBase & {
+  executor: "claude-code";
+  workingRepository: string;
+  claudeCode: ClaudeCodeConfig;
+  openCode?: never;
+};
+
+export type RunnerConfig = OpenCodeRunnerConfig | ClaudeCodeRunnerConfig;
 
 export interface RunnerSecrets {
   discordBotToken?: string;
@@ -200,6 +227,22 @@ function discordIngress(value: unknown): DiscordIngressTransport {
   return result;
 }
 
+function executorProvider(value: unknown): ExecutorProvider {
+  const result = value ?? "opencode";
+  if (result !== "opencode" && result !== "claude-code") {
+    throw new Error('executor must be "opencode" or "claude-code"');
+  }
+  return result;
+}
+
+function claudePermissionMode(value: unknown): PermissionMode {
+  const result = value ?? "bypassPermissions";
+  if (!(["default", "acceptEdits", "bypassPermissions", "plan", "dontAsk", "auto"] as unknown[]).includes(result)) {
+    throw new Error("claudeCode.permissionMode is not supported by the Claude Agent SDK");
+  }
+  return result as PermissionMode;
+}
+
 function routePath(value: unknown, fallback: string, name: string): string {
   const result = value ?? fallback;
   if (typeof result !== "string" || !/^\/[A-Za-z0-9/_-]*$/.test(result)) {
@@ -248,7 +291,9 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
   const slackHttp = object(slack.http ?? {}, "slack.http");
   const discord = object(root.discord ?? {}, "discord");
   const discordHttp = object(discord.http ?? {}, "discord.http");
-  const openCode = object(root.openCode, "openCode");
+  const executor = executorProvider(root.executor);
+  const openCode = executor === "opencode" ? object(root.openCode, "openCode") : undefined;
+  const claudeCode = executor === "claude-code" ? object(root.claudeCode, "claudeCode") : undefined;
   const limits = object(root.limits ?? {}, "limits");
   const storage = object(root.storage, "storage");
   const queue = object(root.queue ?? {}, "queue");
@@ -329,8 +374,8 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
     throw new Error("discord.http.port must differ from slack.http.port when both HTTPS integrations are enabled");
   }
 
-  let model: RunnerConfig["openCode"]["model"];
-  if (openCode.model !== undefined) {
+  let model: OpenCodeConfig["model"];
+  if (openCode?.model !== undefined) {
     const rawModel = object(openCode.model, "openCode.model");
     model = {
       providerID: string(rawModel.providerID, "openCode.model.providerID"),
@@ -338,7 +383,33 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
     };
   }
 
+  const providerConfig = executor === "opencode" ? {
+    executor,
+    workingRepository: resolvePath(openCode!.workingRepository, "openCode.workingRepository", baseDirectory),
+    openCode: {
+      baseUrl: loopbackBaseUrl(openCode!.baseUrl),
+      username: typeof openCode!.username === "string" ? openCode!.username : "opencode",
+      workingRepository: resolvePath(openCode!.workingRepository, "openCode.workingRepository", baseDirectory),
+      approvedVersions: stringArray(openCode!.approvedVersions ?? [], "openCode.approvedVersions"),
+      ...(model ? { model } : {}),
+    },
+  } as const : {
+    executor,
+    workingRepository: resolvePath(claudeCode!.workingRepository, "claudeCode.workingRepository", baseDirectory),
+    claudeCode: {
+      workingRepository: resolvePath(claudeCode!.workingRepository, "claudeCode.workingRepository", baseDirectory),
+      permissionMode: claudePermissionMode(claudeCode!.permissionMode),
+      ...(typeof claudeCode!.model === "string" && claudeCode!.model.trim()
+        ? { model: claudeCode!.model.trim() }
+        : {}),
+      ...(claudeCode!.executablePath !== undefined
+        ? { executablePath: resolvePath(claudeCode!.executablePath, "claudeCode.executablePath", baseDirectory) }
+        : {}),
+    },
+  } as const;
+
   return {
+    ...providerConfig,
     integrations: {
       slack: { allowedTenants: allowedWorkspaceIds, allowedActors: allowedUserIds },
       ...(discordEnabled ? {
@@ -393,13 +464,6 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
         maxConnections: boundedPositiveInteger(slackHttp.maxConnections, defaults.slackHttpMaxConnections, defaults.slackHttpMaxConnections, "slack.http.maxConnections"),
       },
     },
-    openCode: {
-      baseUrl: loopbackBaseUrl(openCode.baseUrl),
-      username: typeof openCode.username === "string" ? openCode.username : "opencode",
-      workingRepository: resolvePath(openCode.workingRepository, "openCode.workingRepository", baseDirectory),
-      approvedVersions: stringArray(openCode.approvedVersions ?? [], "openCode.approvedVersions"),
-      ...(model ? { model } : {}),
-    },
     limits: {
       maxConcurrentJobsPerUser: positiveInteger(limits.maxConcurrentJobsPerUser, defaults.maxConcurrentJobsPerUser, "limits.maxConcurrentJobsPerUser"),
       maxConcurrentJobsGlobal: positiveInteger(limits.maxConcurrentJobsGlobal, defaults.maxConcurrentJobsGlobal, "limits.maxConcurrentJobsGlobal"),
@@ -428,7 +492,7 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
 
 export function loadSecrets(config: RunnerConfig): RunnerSecrets {
   const openCodePassword = process.env.OPENCODE_SERVER_PASSWORD;
-  if (!openCodePassword) throw new Error("OPENCODE_SERVER_PASSWORD is required");
+  if (config.executor === "opencode" && !openCodePassword) throw new Error("OPENCODE_SERVER_PASSWORD is required");
   const slackBotToken = process.env.SLACK_BOT_TOKEN;
   const slackAppToken = process.env.SLACK_APP_TOKEN;
   const slackSigningSecret = process.env.SLACK_SIGNING_SECRET;
@@ -453,7 +517,7 @@ export function loadSecrets(config: RunnerConfig): RunnerSecrets {
     throw new Error("DISCORD_PUBLIC_KEY must be a 64-character hexadecimal Ed25519 public key");
   }
   return {
-    openCodePassword,
+    openCodePassword: openCodePassword ?? "",
     ...(discordBotToken ? { discordBotToken } : {}),
     ...(discordPublicKey ? { discordPublicKey } : {}),
     ...(slackBotToken ? { slackBotToken } : {}),
