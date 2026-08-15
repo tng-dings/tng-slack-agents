@@ -2,7 +2,7 @@
 
 This is the actionable gate for the first live Slack test. Do not add a tester to the allowlist until the Slack administrator/security sign-off items are complete.
 
-The approval and operator sections are completed once, by the operator, against the first installation. Each additional tester then repeats only their own install and the live acceptance test on their own machine, following [`docs/tester-onboarding.md`](../docs/tester-onboarding.md); an installation is never shared.
+Every section below is completed once, by the operator, against the first installation. Each additional tester then only installs their own app and runner on their own machine, following [`docs/tester-onboarding.md`](../docs/tester-onboarding.md), and confirms that `npm run doctor` and `npm run smoke` pass and that one DM round-trip returns a result. Testers do not repeat the acceptance test; an installation is never shared.
 
 ## Slack administrator and security approval
 
@@ -49,6 +49,8 @@ Evidence recorded against commit `5cec5cc` on native Windows:
 This evidence does not yet cover WinSW installation, DPAPI provisioning under the virtual service identity, service ACL validation, live Slack execution, graceful service cancellation, interrupted-session restart recovery, or the final OpenCode service regression. Those remain required below.
 
 ## Live acceptance test
+
+Run once by the operator. The behavior verified here is a property of the runner, not of an individual install, so later testers inherit it.
 
 - [ ] An unauthorized Slack member receives a denial and no job executes.
 - [ ] The allowlisted tester DMs the app and immediately receives `Working…` in the same thread.
