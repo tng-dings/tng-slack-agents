@@ -30,7 +30,7 @@ Perform validation with a disposable repository and the same native-Windows serv
    - timeout and graceful cancellation;
    - runner termination during an active turn, restart abort/status reconciliation, and quarantine when status cannot prove idle;
    - two independent sessions plus serialization of two jobs in one session;
-   - retention cleanup of a known session/worktree.
+   - retention removal of a clean worktree while preserving its branch, refusal to remove a dirty worktree, and later branch reattachment.
 6. Inspect JSONL and SQLite audit events for `opencode_schema_mismatch`, `opencode_unknown_event`, `opencode_version_rejected`, abort failures, or leaked prompt/secret content. Any unexplained occurrence blocks approval.
 7. Add the exact candidate version to the production allowlist, deploy the candidate worker, run `npm run doctor`, and only then start AgentRunner and the integration gateways.
 

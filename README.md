@@ -1,6 +1,6 @@
 # Self-hosted Slack and Discord agent runner
 
-This service accepts allowlisted Slack direct messages and Discord agent-thread conversations, persists them as integration-namespaced jobs in SQLite, and runs them through an authenticated localhost OpenCode server on Windows. During uninterrupted operation, Slack threads and bot-created Discord threads retain an OpenCode session and detached Git worktree.
+This service accepts allowlisted Slack direct messages and Discord agent-thread conversations, persists them as integration-namespaced jobs in SQLite, and runs them through an authenticated localhost OpenCode server on Windows. During uninterrupted operation, Slack threads and bot-created Discord threads retain an OpenCode session and a deterministic Git worktree on a dedicated local branch.
 
 ## Current MVP behavior
 
@@ -11,14 +11,14 @@ This service accepts allowlisted Slack direct messages and Discord agent-thread 
 - Durable SQLite queue and OpenCode session mapping keyed by normalized integration, tenant, conversation, and thread identities.
 - Per-thread serialization, per-user/global concurrency limits, queue limit, timeout, allowlist, and daily cost cap.
 - Bounded JSONL and SQLite audit records containing content hashes/lengths, usage, failures, and tool metadata; automatic 30-day retention is enabled by default.
-- A detached Git worktree per Slack or Discord session. Running work is never silently replayed after a process crash; it is marked failed, while queued jobs survive.
+- A branch-backed Git worktree per Slack or Discord session. The directory and `agent-runner/<session-hash>` branch are derived from the same 80-bit session hash. Running work is never silently replayed after a process crash; it is marked failed, while queued jobs survive.
 - Separate DPAPI-protected gateway and worker secret bundles, distinct Windows virtual service identities, and explicit denial of Slack and Discord credentials in the worker launcher.
 
 ## PoC operating model
 
-- The detached worktree is the durable conversation state. After an interrupted provider turn, AgentRunner proves the old turn stopped, retires the ambiguous OpenCode session, and continues in the same worktree with a fresh provider session.
+- The per-session branch and its worktree are the durable repository state. After an interrupted provider turn, AgentRunner proves the old turn stopped, retires the ambiguous OpenCode session, and continues on the same branch with a fresh provider session.
 - Any unresolved provider turn blocks AgentRunner startup. Runtime reconciliation retries automatically; `npm run status` reports blocked sessions using bounded hashed references without exposing platform or conversation identifiers.
-- Worktrees use the configured retention period. Named branches, archive workflows, setup hooks, and orphan adoption are outside the PoC rather than partially implemented.
+- Worktrees use the configured retention period, which is 30 days by default. Retention removes only worktrees that Git reports as clean and leaves their local branches available for later reattachment; tracked changes or non-ignored untracked files cause cleanup to be skipped. Automated commit, push, merge, branch deletion, archive workflows, setup hooks, and orphan adoption are outside the PoC.
 - OpenCode is the only runtime. The narrow provider-neutral interface is retained as a seam, but ACP and multi-provider orchestration are not PoC goals.
 - Execution remains unattended and fail-closed. Permission requests are rejected, and Git worktrees provide isolation between conversations but are not an OS sandbox.
 

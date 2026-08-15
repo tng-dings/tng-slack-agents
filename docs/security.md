@@ -26,9 +26,9 @@ The duplicated OpenCode password authenticates one loopback-only connection. It 
 - Slack and Discord credentials never enter the worker secret bundle. Gateway Git subprocesses receive an allowlisted environment without gateway secrets.
 - Runtime-inline OpenCode policy denies external-directory access, web tools, subagents, skills, and interactive questions; unknown tools require approval and are automatically rejected. Shell/edit access remains because this is a coding worker.
 - Unexpected OpenCode permission requests are rejected rather than approved through Slack.
-- Source and worktree paths are administrator-configured. Worktree names are SHA-256-derived under a resolved root, and Git is invoked with argument arrays rather than shell strings.
+- Source and worktree paths are administrator-configured. Worktree directories and `agent-runner/<session-hash>` branch names are derived from the same truncated SHA-256 session hash, and Git is invoked with argument arrays rather than shell strings.
 - Prompts and outputs have hard character limits. Audit event payloads are bounded and contain hashes/lengths rather than prompt or output bodies.
-- Job content is removed on completion by default. Jobs, usage aggregates, JSONL/SQLite audit records, OpenCode sessions, and detached worktrees older than `storage.retentionDays` are purged automatically.
+- Job content is removed on completion by default. Jobs, usage aggregates, JSONL/SQLite audit records, and OpenCode sessions older than `storage.retentionDays` are purged automatically. Expired worktrees are removed only when Git reports them clean; local branches and dirty worktrees are never deleted by retention.
 - Integration delivery failures are audited separately and cannot change a successful execution into a failed execution.
 - Concurrency, queue, timeout, and reported-cost limits constrain resource use.
 

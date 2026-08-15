@@ -16,7 +16,7 @@ The current OpenCode integration is a sensible MVP design for the project's deli
 - The runner provides a durable queue, idempotent ingress, per-session serialization, limits, audit records, and platform-specific delivery.
 - The worker applies a restrictive unattended-execution policy.
 
-Phase 1 now persists execution resources before prompt submission, makes provisioning retryable, cancels active jobs during shutdown, and blocks interrupted remote turns until reconciliation proves them stopped. Phase 2 has added provider-neutral persistence and strict protocol/version gates. The service remains fail-closed until an operator validates and records a real OpenCode version, and the Phase 3 workspace-lifecycle work remains recommended before broader production use.
+Phase 1 now persists execution resources before prompt submission, makes provisioning retryable, cancels active jobs during shutdown, and blocks interrupted remote turns until reconciliation proves them stopped. Phase 2 has added provider-neutral persistence and strict protocol/version gates. The first bounded Phase 3 improvement uses one deterministic named branch per session and clean-only worktree retention; broader lifecycle and administrative workflows remain deferred. The service remains fail-closed until an operator validates and records a real OpenCode version.
 
 BBX has a materially more mature general-purpose agent runtime, but its OpenCode path uses the generic Agent Client Protocol (ACP) adapter and is not included in BBX's real-provider test matrix. BBX also supports Windows only through WSL2, while this project intentionally supports native Windows services, DPAPI, and Windows virtual service identities. Do not replace the runner wholesale with BBX.
 
@@ -31,7 +31,7 @@ Slack/Discord ingress
   -> per-session queue/concurrency policy
   -> OpenCodeExecutor
   -> authenticated loopback `opencode serve`
-  -> detached Git worktree
+  -> deterministic per-session Git branch and worktree
   -> redacted and bounded platform delivery
 ```
 
@@ -39,7 +39,7 @@ Relevant implementation:
 
 - `src/runner.ts` owns durable submission, queueing, limits, execution, audit, and delivery lifecycle.
 - `src/opencode.ts` owns the OpenCode HTTP/SSE API integration.
-- `src/workspace.ts` creates and removes detached Git worktrees.
+- `src/workspace.ts` creates, verifies, reattaches, and cleanly removes deterministic branch-backed Git worktrees.
 - `src/database.ts` persists jobs, sessions, usage, inbound events, and audit events.
 - `scripts/Start-OpenCode.ps1` starts the isolated worker and applies its runtime policy.
 
@@ -206,12 +206,12 @@ Required change:
 
 ### P1: Workspace lifecycle is minimal
 
-The current manager creates a detached worktree at the repository's current `HEAD`. It has no explicit provisioning state, named branch, setup hook, preservation workflow, or orphan sweep.
+The original manager created a detached worktree at the repository's current `HEAD` and had no explicit provisioning state, named branch, setup hook, preservation workflow, or orphan sweep. The current manager now derives a directory and `agent-runner/<session-hash>` branch from the same session identity, creates the branch at source `HEAD` only on first use, and reattaches an existing branch without resetting it. Explicit lifecycle state, setup, orphan discovery, and administrative preservation/deletion workflows remain deferred.
 
 Recommended improvements:
 
 - Track workspace lifecycle independently: `provisioning`, `ready`, `retiring`, `destroying`, `destroyed`, and `error`, or a smaller equivalent state machine.
-- Use a named per-session branch when work is expected to be reviewed, pushed, or retained.
+- Use a named per-session branch when work is expected to be reviewed, pushed, or retained. (Implemented.)
 - Record the source commit and branch used for provisioning.
 - Add an optional bounded, non-interactive setup hook.
 - Add an explicit preserve/archive/delete workflow.
@@ -349,7 +349,7 @@ Deferred operator validation:
 ### Phase 3: Workspace maturity
 
 - [ ] Introduce explicit workspace lifecycle state.
-- [ ] Decide detached worktree versus named branch as a product behavior.
+- [x] Use a deterministic named branch for each session and retain it when a clean worktree expires.
 - [ ] Add source-revision metadata.
 - [ ] Add a bounded non-interactive setup hook if real repositories require it.
 - [ ] Add safe orphan discovery and reconciliation.
@@ -360,6 +360,13 @@ Acceptance criteria:
 - Every managed worktree is owned by a database environment/session record or reported as a recoverable orphan.
 - Provisioning errors are visible and retryable.
 - Cleanup cannot escape the configured root or delete an unverified directory.
+
+Named-branch implementation notes (completed August 2026):
+
+- One centralized SHA-256-derived identity supplies both the 20-character directory name and `agent-runner/<session-hash>` branch, so the names cannot diverge.
+- Provisioning handles both first creation and reattachment after retention. It verifies the configured repository, expected directory, and exact symbolic branch, repairs only a stale registration at the missing expected path, and fails when the branch is checked out elsewhere.
+- Retention removes a worktree without `--force` only after a porcelain status check reports no tracked changes or non-ignored untracked files. It never deletes the local branch, so a later job in the same thread can reattach it.
+- Commit, push, merge, rebase, branch deletion, and Slack administration commands remain explicit user/operator concerns.
 
 ### Phase 4: OpenCode ACP experiment
 

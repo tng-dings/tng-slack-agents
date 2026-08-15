@@ -31,7 +31,7 @@ This is the actionable gate for the first live Slack test. Do not add a tester t
 
 - [ ] An unauthorized Slack member receives a denial and no job executes.
 - [ ] The allowlisted tester DMs the app and immediately receives `Working…` in the same thread.
-- [ ] OpenCode executes in the thread's detached worktree and the response streams or updates in that Slack thread.
+- [ ] OpenCode executes in the thread's deterministic `agent-runner/<session-hash>` branch worktree and the response streams or updates in that Slack thread.
 - [ ] A second message in the same thread reuses its OpenCode session and is serialized behind any active job.
 - [ ] A different thread receives a distinct persisted session/worktree.
 - [ ] Restart the gateway with one queued job and confirm the queued job survives.

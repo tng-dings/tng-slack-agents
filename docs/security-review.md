@@ -33,7 +33,7 @@ Allowlisted Slack DM (text and optional image attachments)
   -> Slack Socket Mode connection
   -> AgentRunner downloads images via authenticated Slack API, persists prompt + attachments as a queued job
   -> authenticated 127.0.0.1 OpenCode API (text prompt + image file parts)
-  -> OpenCodeServer (provider credential, detached worktree)
+  -> OpenCodeServer (provider credential, branch-backed worktree)
   -> approved model provider
   -> redacted and bounded response to the originating Slack DM thread
 ```
@@ -105,7 +105,7 @@ Evidence:
 - Tool audit records contain tool name, call ID, and status rather than tool input/output.
 - Audit payload size is capped.
 - Completed job prompt/output content is removed by default.
-- Jobs, usage aggregates, SQLite/JSONL audit events, OpenCode session/message data, and detached worktrees are deleted after the configured retention period; the approval configuration uses 30 days.
+- Jobs, usage aggregates, SQLite/JSONL audit events, and OpenCode session/message data are deleted after the configured retention period; the approval configuration uses 30 days. Expired worktrees are removed only when clean, while their local branches remain available for reattachment and dirty worktrees are retained.
 - Data directories are restricted to administrators, SYSTEM, and the owning service identity.
 
 ## Worker controls
@@ -113,7 +113,7 @@ Evidence:
 - OpenCode accepts only an HTTP loopback literal; remote hosts, URL credentials, paths, queries, fragments, and redirects are rejected.
 - HTTP Basic authentication uses a high-entropy password shared only between the two service bundles.
 - Runtime-inline OpenCode configuration disables auto-update, external-directory access, web tools, subagents, skills, and interactive questions. Unknown tools require approval and the coordinator rejects permission requests.
-- A detached worktree is used per normalized Slack/Discord session, with per-session serialization.
+- A deterministic `agent-runner/<session-hash>` branch and worktree are used per normalized Slack/Discord session, with per-session serialization.
 - Global/per-user concurrency, queue, timeout, output, and reported-cost limits are enforced.
 - Integration delivery failure cannot change a successful execution result or trigger an automatic replay.
 

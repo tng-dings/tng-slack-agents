@@ -55,7 +55,7 @@ Discord credentials belong only in the AgentRunner gateway bundle. They must nev
 
 - `/agent` in a normal channel creates a public thread and queues the initial prompt there.
 - The bot posts `Working…` in the thread and replaces it with the redacted final result; long results are split into bounded messages.
-- Ordinary owner messages in that registered thread are follow-up jobs in the same session and detached worktree.
+- Ordinary owner messages in that registered thread are follow-up jobs in the same session and branch-backed worktree.
 - Jobs are serialized per thread. The configured per-user queue and concurrency limits still apply.
 - `/agent` inside a thread is denied; write an ordinary follow-up message instead.
 - Archived/deleted or unregistered threads do not create new sessions automatically.
