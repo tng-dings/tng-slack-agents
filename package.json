@@ -16,7 +16,7 @@
     "status": "tsx src/cli/status.ts",
     "smoke": "tsx src/cli/smoke.ts",
     "security:audit": "npm audit --audit-level=high",
-    "test": "npm run build && node --test --test-isolation=none --test-concurrency=1 dist/test/discord.test.js dist/test/discord-http.test.js dist/test/edge-hardening.test.js dist/test/opencode.test.js dist/test/reporter-routing.test.js dist/test/runner.test.js dist/test/security.test.js dist/test/slack.test.js dist/test/slack-http.test.js"
+    "test": "npm run build && node --test --test-isolation=none --test-concurrency=1 dist/test/discord.test.js dist/test/discord-http.test.js dist/test/edge-hardening.test.js dist/test/opencode.test.js dist/test/reporter-routing.test.js dist/test/runner.test.js dist/test/security.test.js dist/test/slack.test.js dist/test/slack-http.test.js dist/test/workspace.test.js"
   },
   "dependencies": {
     "@discordjs/rest": "^2.6.3",
