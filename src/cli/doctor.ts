@@ -62,6 +62,41 @@ async function main(): Promise<void> {
         return config.slack.ingress;
       },
     });
+    checks.push({
+      name: "Slack allowlist identifier shapes",
+      run: async () => {
+        for (const workspaceId of config.slack.allowedWorkspaceIds) {
+          if (!/^[TE][A-Z0-9]{2,}$/.test(workspaceId)) {
+            throw new Error(`slack.allowedWorkspaceIds contains "${workspaceId}"; a workspace ID looks like T0123456789`);
+          }
+        }
+        for (const userId of config.slack.allowedUserIds) {
+          if (!/^[UW][A-Z0-9]{2,}$/.test(userId)) {
+            throw new Error(`slack.allowedUserIds contains "${userId}"; copy your member ID (like U0123456789) from your Slack profile`);
+          }
+        }
+        return `${config.slack.allowedWorkspaceIds.length} workspace(s), ${config.slack.allowedUserIds.length} user(s)`;
+      },
+    });
+    checks.push({
+      name: "Slack bot token and workspace match",
+      run: async () => {
+        const response = await fetch("https://slack.com/api/auth.test", {
+          method: "POST",
+          headers: { authorization: `Bearer ${secrets.slackBotToken}`, "content-type": "application/x-www-form-urlencoded" },
+          redirect: "error",
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const body = await response.json() as { ok?: boolean; error?: string; team_id?: string; user?: string };
+        if (!body.ok) throw new Error(`Slack rejected the bot token: ${body.error ?? "unknown_error"}`);
+        const teamId = body.team_id ?? "";
+        if (!config.slack.allowedWorkspaceIds.includes(teamId)) {
+          throw new Error(`This bot token belongs to workspace ${teamId}, which is not in slack.allowedWorkspaceIds`);
+        }
+        return `${body.user ?? "bot"} in ${teamId}`;
+      },
+    });
   }
   if (config.discord.enabled) {
     checks.push({
