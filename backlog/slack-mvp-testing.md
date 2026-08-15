@@ -2,15 +2,17 @@
 
 This is the actionable gate for the first live Slack test. Do not add a tester to the allowlist until the Slack administrator/security sign-off items are complete.
 
+The approval and operator sections are completed once, by the operator, against the first installation. Each additional tester then repeats only their own install and the live acceptance test on their own machine, following [`docs/tester-onboarding.md`](../docs/tester-onboarding.md); an installation is never shared.
+
 ## Slack administrator and security approval
 
-- [ ] Approve one internal, non-Marketplace custom app named **Company Coding Agent** in the test workspace.
+- [ ] Approve internal, non-Marketplace custom apps named **Company Coding Agent (*tester*)** in the test workspace, one per tester and capped at five.
 - [ ] Approve Slack's current `agent_view` Agents experience with the Messages tab enabled; `assistant_view` is not requested.
 - [ ] Approve only the bot scopes `assistant:write`, `chat:write`, `files:read`, and `im:history`.
 - [ ] Approve the bot events `app_home_opened` and `message.im`.
 - [ ] Enable Socket Mode and create one app-level `xapp-` token with only `connections:write`.
-- [ ] Install the app and transfer its `xoxb-` bot token through the approved secret channel.
-- [ ] Confirm DM-only testing with one exact workspace ID and one named allowlisted tester; do not invite the app to channels or multi-person DMs.
+- [ ] Approve each tester's install; every tester generates and keeps their own `xoxb-` and `xapp-` tokens, so no token is transferred.
+- [ ] Confirm DM-only testing with one exact workspace ID and, per install, only that install's own tester; do not invite the apps to channels or multi-person DMs.
 - [ ] Approve the data flow from Slack to company-managed local compute and onward to the separately approved model provider through the selected executor.
 - [ ] Approve audit capture of user ID, Slack thread, content hashes/lengths, tool metadata, usage, cost, and failures.
 - [ ] Confirm the audit-data owner, access policy, and automatic 30-day retention.
@@ -18,7 +20,7 @@ This is the actionable gate for the first live Slack test. Do not add a tester t
 
 ## Operator preparation
 
-- [ ] Import and validate [`slack/manifest.json`](../slack/manifest.json) in Slack's app-management UI.
+- [ ] Import and validate [`slack/manifest.json`](../slack/manifest.json) in Slack's app-management UI; testers install `npm run slack:manifest -- --label "<tester>"` output, which differs only in the app and bot display names.
 - [ ] Record the approved workspace ID in `slack.allowedWorkspaceIds` and tester ID in `slack.allowedUserIds`.
 - [ ] Install the WinSW services required by the selected executor: AgentRunner only for Claude Code, or AgentRunner plus OpenCodeServer for OpenCode.
 - [ ] Provision the selected executor with `Set-AgentRunnerSecrets.ps1`: one AgentRunner DPAPI bundle containing the Claude credential in Claude mode, or separate gateway/worker bundles in OpenCode mode.

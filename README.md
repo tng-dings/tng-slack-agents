@@ -132,6 +132,18 @@ npm run dev
 
 Enter the `xoxb-...` value for `SLACK_BOT_TOKEN` and the `xapp-...` value for `SLACK_APP_TOKEN`; do not paste either value into source files or ordinary Slack messages. `npm run dev` remains in the foreground and connects to Slack over an outbound WebSocket. Keep both terminals open while testing, stop the gateway with `Ctrl+C`, and then stop OpenCode. Only exact workspace IDs in `slack.allowedWorkspaceIds` and user IDs in `slack.allowedUserIds` can enqueue work. Start with a disposable repository and a single allowlisted tester.
 
+## Multiple testers: one bot per person
+
+Work executes on the machine that receives the Slack event, and Slack load-balances Socket Mode events across every connection open for one app token. Two people running the same app would therefore execute each other's prompts at random. So each tester installs their own Slack app and runs their own runner against their own repository; nothing is shared between them.
+
+```powershell
+npm run slack:manifest -- --label "Simon"
+```
+
+That prints [slack/manifest.json](slack/manifest.json) with only the app and bot display names changed, which is what Slack's **Create New App → From a manifest** dialog expects — Slack rejects a duplicate app name in a workspace. The full tester-facing procedure is [docs/tester-onboarding.md](docs/tester-onboarding.md); the administrator-facing version is the [Slack checklist](docs/slack-admin-checklist.md).
+
+Adding another person to `slack.allowedUserIds` is a different thing entirely: it grants them unsandboxed execution on *your* machine under *your* credentials. Keep that list to one member ID per installation.
+
 ## Slack Events API development run
 
 Set `slack.ingress` to `"events-api"`, set `slack.appId` to the exact Slack application ID, keep `slack.http.host` at the reviewed `127.0.0.1` address, and configure `port`, `eventsPath`, and `healthPath`. Use [slack/manifest.events-api.json](slack/manifest.events-api.json) after replacing its example Request URL with the managed public TLS URL. The public edge must forward only the events and health paths to the private Node listener.
