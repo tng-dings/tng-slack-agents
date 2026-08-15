@@ -7,6 +7,7 @@ import { AuditLogger } from "../src/audit.js";
 import { loadConfig, loadSecrets } from "../src/config.js";
 import { RunnerDatabase } from "../src/database.js";
 import { AgentRunner } from "../src/runner.js";
+import { personalizeSlackManifest } from "../src/slack/manifest.js";
 import { unprivilegedChildEnvironment } from "../src/environment.js";
 import type { Executor, JobReporter } from "../src/types.js";
 import { testAuthorizationPolicy, testConfig, testExecutor, waitFor } from "./helpers.js";
@@ -400,6 +401,28 @@ test("Slack manifest includes files:read for screenshot support", async () => {
   assert.deepEqual(httpManifest.oauth_config.scopes.bot, botScopes);
   assert.equal(httpManifest.settings.socket_mode_enabled, false);
   assert.match(httpManifest.settings.event_subscriptions.request_url, /^https:\/\//);
+});
+
+test("per-tester manifest personalization changes only the app and bot names", async () => {
+  const base = JSON.parse(await readFile("slack/manifest.json", "utf8")) as Record<string, unknown>;
+  const personalized = personalizeSlackManifest(base, "Simon") as typeof base & {
+    display_information: { name: string };
+    features: { bot_user: { display_name: string } };
+  };
+
+  assert.equal(personalized.display_information.name, "Company Coding Agent (Simon)");
+  assert.equal(personalized.features.bot_user.display_name, "Company Coding Agent (Simon)");
+  assert.deepEqual(personalized.oauth_config, base.oauth_config);
+  assert.deepEqual(personalized.settings, base.settings);
+  assert.deepEqual(
+    { ...personalized.display_information, name: undefined },
+    { ...(base.display_information as Record<string, unknown>), name: undefined },
+  );
+  assert.deepEqual(base, JSON.parse(await readFile("slack/manifest.json", "utf8")));
+
+  assert.throws(() => personalizeSlackManifest(base, ""), /label is required/);
+  assert.throws(() => personalizeSlackManifest(base, "rm -rf /"), /must start with a letter or digit/);
+  assert.throws(() => personalizeSlackManifest(base, "Maximilian Alexander"), /Slack allows 35/);
 });
 
 test("gateway child processes receive an allowlisted environment without secrets", () => {
