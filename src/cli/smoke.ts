@@ -20,7 +20,7 @@ async function main(): Promise<void> {
   const audit = new AuditLogger(
     config.storage.auditLogPath,
     database,
-    [secrets.openCodePassword],
+    [secrets.openCodePassword, ...(secrets.providerCredentials ?? [])],
     config.limits.maxAuditEventCharacters,
   );
   const workspaces = new WorkspaceManager(config.workingRepository, config.storage.worktreeRoot);

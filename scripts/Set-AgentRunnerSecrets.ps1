@@ -45,7 +45,8 @@ function Assert-Identity([string]$Identity) {
 function Set-RestrictedDirectoryAcl(
     [string]$Path,
     [string[]]$ServiceIdentities,
-    [string]$ServiceRights = "Modify"
+    [string]$ServiceRights = "Modify",
+    [string]$OwnerIdentity = ""
 ) {
     New-Item -ItemType Directory -Force -Path $Path | Out-Null
     $acl = New-Object Security.AccessControl.DirectorySecurity
@@ -59,6 +60,9 @@ function Set-RestrictedDirectoryAcl(
         $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule(
             $identity, $ServiceRights, "ContainerInherit,ObjectInherit", "None", "Allow"
         )))
+    }
+    if (-not [string]::IsNullOrWhiteSpace($OwnerIdentity)) {
+        $acl.SetOwner((New-Object Security.Principal.NTAccount($OwnerIdentity)))
     }
     Set-Acl -Path $Path -AclObject $acl
 }
@@ -124,7 +128,7 @@ if ($Executor -eq "opencode") {
     Set-RestrictedDirectoryAcl $worktreeDirectory @($GatewayServiceIdentity, $WorkerServiceIdentity)
 }
 else {
-    Set-RestrictedDirectoryAcl (Join-Path $GatewayDataDirectory "claude") @($GatewayServiceIdentity)
+    Set-RestrictedDirectoryAcl (Join-Path $GatewayDataDirectory "claude") @($GatewayServiceIdentity) "Modify" $GatewayServiceIdentity
     Set-RestrictedDirectoryAcl (Join-Path $GatewayDataDirectory "worktrees") @($GatewayServiceIdentity)
 }
 

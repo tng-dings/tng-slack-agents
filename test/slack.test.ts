@@ -9,7 +9,7 @@ import {
   SlackSocketIngress,
   type SlackEventHandler,
 } from "../src/slack.js";
-import type { JobSubmission } from "../src/types.js";
+import type { JobRecord, JobSubmission } from "../src/types.js";
 import { testConfig } from "./helpers.js";
 
 function clientDouble(calls: Array<{ kind: string; value: unknown }>): WebClient {
@@ -19,6 +19,10 @@ function clientDouble(calls: Array<{ kind: string; value: unknown }>): WebClient
         calls.push({ kind: "post", value });
         return { ok: true, ts: "reply-ts" };
       },
+      update: async (value: unknown) => {
+        calls.push({ kind: "update", value });
+        return { ok: true };
+      },
     },
     assistant: {
       threads: {
@@ -26,10 +30,38 @@ function clientDouble(calls: Array<{ kind: string; value: unknown }>): WebClient
           calls.push({ kind: "prompts", value });
           return { ok: true };
         },
+        setStatus: async (value: unknown) => {
+          calls.push({ kind: "status", value });
+          return { ok: true };
+        },
       },
     },
   } as unknown as WebClient;
 }
+
+test("Slack delivery redacts Claude provider credentials", async () => {
+  const config = testConfig(".");
+  const calls: Array<{ kind: string; value: unknown }> = [];
+  const adapter = new SlackAdapter(
+    config,
+    {
+      openCodePassword: "",
+      slackBotToken: "xoxb-secret",
+      providerCredentials: ["claude-provider-secret"],
+    },
+    clientDouble(calls),
+  );
+  const reporter = adapter.reporter({
+    conversationId: "D1",
+    threadId: "1.0",
+    deliveryMessageId: "reply-ts",
+  } as JobRecord);
+
+  await reporter.succeed("result: claude-provider-secret");
+  const update = calls.find((call) => call.kind === "update")?.value as { text: string };
+  assert.doesNotMatch(update.text, /claude-provider-secret/);
+  assert.match(update.text, /\[REDACTED\]/);
+});
 
 test("Slack message normalization applies shared DM, identity, prompt, and thread rules without I/O", () => {
   const parsed = parseSlackMessage({

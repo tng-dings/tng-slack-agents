@@ -54,6 +54,27 @@ function Test-RestrictedAcl([string]$Path, [string[]]$AllowedIdentities) {
     return $unexpectedAllows.Count -eq 0
 }
 
+function Test-ProtectedAcl([string]$Path) {
+    if (-not (Test-Path $Path)) { return $false }
+    return (Get-Acl $Path).AreAccessRulesProtected
+}
+
+function Test-IdentityHasRights(
+    [string]$Path,
+    [string]$Identity,
+    [Security.AccessControl.FileSystemRights]$RequiredRights
+) {
+    if (-not (Test-Path $Path)) { return $false }
+    foreach ($rule in (Get-Acl $Path).Access) {
+        if (
+            $rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            $rule.IdentityReference.Value -eq $Identity -and
+            ($rule.FileSystemRights -band $RequiredRights) -eq $RequiredRights
+        ) { return $true }
+    }
+    return $false
+}
+
 $config = $null
 $executor = "opencode"
 if (Test-Path $ConfigPath) {
@@ -105,12 +126,15 @@ if ($executor -eq "opencode") {
     }
 }
 elseif ($executor -eq "claude-code") {
-    Assert-Control ($gatewayAclNames -contains "NT SERVICE\AgentRunner") "AgentRunner owns access to its data directory"
+    Assert-Control (Test-RestrictedAcl $GatewayDataDirectory @("NT AUTHORITY\SYSTEM", "BUILTIN\Administrators", "NT SERVICE\AgentRunner")) "AgentRunner data directory is not broadly readable"
+    Assert-Control (Test-ProtectedAcl $GatewayDataDirectory) "AgentRunner data directory disables inherited access rules"
+    Assert-Control (Test-IdentityHasRights $GatewayDataDirectory "NT SERVICE\AgentRunner" ([Security.AccessControl.FileSystemRights]::Modify)) "AgentRunner has Modify access to its data directory"
     Assert-Control (Test-Path $ClaudeConfigDirectory) "persistent Claude config directory exists"
     if (Test-Path $ClaudeConfigDirectory) {
-        $claudeAclNames = @((Get-Acl $ClaudeConfigDirectory).Access.IdentityReference.Value)
-        Assert-Control ($claudeAclNames -contains "NT SERVICE\AgentRunner") "AgentRunner owns access to its Claude config directory"
+        Assert-Control ((Get-Acl $ClaudeConfigDirectory).Owner -eq "NT SERVICE\AgentRunner") "AgentRunner owns its Claude config directory"
+        Assert-Control (Test-IdentityHasRights $ClaudeConfigDirectory "NT SERVICE\AgentRunner" ([Security.AccessControl.FileSystemRights]::Modify)) "AgentRunner has Modify access to its Claude config directory"
         Assert-Control (Test-RestrictedAcl $ClaudeConfigDirectory @("NT AUTHORITY\SYSTEM", "BUILTIN\Administrators", "NT SERVICE\AgentRunner")) "Claude config directory is not broadly readable"
+        Assert-Control (Test-ProtectedAcl $ClaudeConfigDirectory) "Claude config directory disables inherited access rules"
     }
     if (Test-Path $gatewaySecretPath) {
         $names = Read-SecretNames $gatewaySecretPath
@@ -182,9 +206,9 @@ if ($config) {
         Assert-Control (Test-IsWithin $resolvedWorktreeRoot $GatewayDataDirectory) "Claude worktree storage is inside the AgentRunner data directory"
         Assert-Control (Test-Path $resolvedWorktreeRoot) "Claude worktree storage exists"
         if (Test-Path $resolvedWorktreeRoot) {
-            $worktreeAclNames = @((Get-Acl $resolvedWorktreeRoot).Access.IdentityReference.Value)
-            Assert-Control ($worktreeAclNames -contains "NT SERVICE\AgentRunner") "AgentRunner can access the Claude worktree area"
+            Assert-Control (Test-IdentityHasRights $resolvedWorktreeRoot "NT SERVICE\AgentRunner" ([Security.AccessControl.FileSystemRights]::Modify)) "AgentRunner has Modify access to the Claude worktree area"
             Assert-Control (Test-RestrictedAcl $resolvedWorktreeRoot @("NT AUTHORITY\SYSTEM", "BUILTIN\Administrators", "NT SERVICE\AgentRunner")) "Claude worktree area is not broadly readable"
+            Assert-Control (Test-ProtectedAcl $resolvedWorktreeRoot) "Claude worktree area disables inherited access rules"
         }
     }
 

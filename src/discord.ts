@@ -57,6 +57,7 @@ export class DiscordGateway {
       secrets.slackBotToken ?? "",
       secrets.slackAppToken ?? "",
       secrets.slackSigningSecret ?? "",
+      ...(secrets.providerCredentials ?? []),
     ];
     this.adapter = new DiscordAdapter(config, this.api, database, outputSecrets);
     const handler = new DiscordDurableInteractionHandler(database, this.adapter, config.queue.pollIntervalMs);

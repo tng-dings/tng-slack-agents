@@ -47,6 +47,7 @@ export class SlackAdapter {
       secrets.slackBotToken,
       secrets.slackAppToken ?? "",
       secrets.slackSigningSecret ?? "",
+      ...(secrets.providerCredentials ?? []),
     ];
     this.fetcher = options.fetch ?? globalThis.fetch;
     this.now = options.now ?? Date.now;

@@ -68,18 +68,31 @@ test("configuration selects Claude Code without OpenCode settings or password", 
     storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
   }));
   const previousPassword = process.env.OPENCODE_SERVER_PASSWORD;
+  const previousClaudeCredential = process.env.ANTHROPIC_API_KEY;
   delete process.env.OPENCODE_SERVER_PASSWORD;
+  process.env.ANTHROPIC_API_KEY = "claude-provider-secret";
   try {
     const loaded = await loadConfig(filename);
     assert.equal(loaded.executor, "claude-code");
     if (loaded.executor !== "claude-code") throw new Error("Expected Claude Code configuration");
     assert.equal(loaded.claudeCode.model, "claude-sonnet-4-5");
     assert.equal(loaded.claudeCode.permissionMode, "bypassPermissions");
-    assert.equal(loadSecrets(loaded).openCodePassword, "");
+    const secrets = loadSecrets(loaded);
+    assert.equal(secrets.openCodePassword, "");
+    assert.deepEqual(secrets.providerCredentials, ["claude-provider-secret"]);
   } finally {
     if (previousPassword === undefined) delete process.env.OPENCODE_SERVER_PASSWORD;
     else process.env.OPENCODE_SERVER_PASSWORD = previousPassword;
+    if (previousClaudeCredential === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousClaudeCredential;
   }
+  await writeFile(filename, JSON.stringify({
+    executor: "claude-code",
+    slack: { enabled: false, allowedWorkspaceIds: [], allowedUserIds: [] },
+    claudeCode: { workingRepository: root, model: 42 },
+    storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
+  }));
+  await assert.rejects(loadConfig(filename), /claudeCode\.model/);
   await writeFile(filename, JSON.stringify({
     executor: "unknown",
     slack: { enabled: false, allowedWorkspaceIds: [], allowedUserIds: [] },
@@ -354,6 +367,7 @@ test("Windows service provisioning accepts only supported Claude credentials and
   ]);
   assert.match(provisioner, /if \(\$Executor -eq "opencode"\) \{\s*Assert-Identity \$WorkerServiceIdentity/);
   assert.match(provisioner, /Join-Path \$GatewayDataDirectory "claude"/);
+  assert.match(provisioner, /"Modify" \$GatewayServiceIdentity/);
   assert.match(provisioner, /\$gatewaySecrets\[\$ClaudeCredentialName\] = Read-PlainSecret \$ClaudeCredentialName/);
   assert.match(provisioner, /no OpenCode worker bundle was created/);
 
@@ -364,6 +378,9 @@ test("Windows service provisioning accepts only supported Claude credentials and
   assert.match(securityAudit, /elseif \(\$executor -eq "claude-code"\)/);
   assert.match(securityAudit, /does not require an OpenCodeServer service/);
   assert.match(securityAudit, /gateway bundle contains exactly one supported Claude credential/);
+  assert.match(securityAudit, /Test-IdentityHasRights/);
+  assert.match(securityAudit, /AgentRunner owns its Claude config directory/);
+  assert.match(securityAudit, /Claude worktree area disables inherited access rules/);
   assert.doesNotMatch(service, /OpenCode agent runner/);
 });
 

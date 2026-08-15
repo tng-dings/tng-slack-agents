@@ -20,6 +20,7 @@ async function main(): Promise<void> {
     secrets.slackBotToken ?? "",
     secrets.slackAppToken ?? "",
     secrets.slackSigningSecret ?? "",
+    ...(secrets.providerCredentials ?? []),
   ], config.limits.maxAuditEventCharacters);
   const workspaces = new WorkspaceManager(config.workingRepository, config.storage.worktreeRoot);
   const executor: Executor = config.executor === "opencode"

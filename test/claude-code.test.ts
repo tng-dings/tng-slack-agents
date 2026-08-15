@@ -87,9 +87,17 @@ test("Claude Code streams input/output, maps tools and usage, and resumes the du
     CLAUDE_CODE_OAUTH_TOKEN: "oauth-token",
     CLAUDE_CONFIG_DIR: "C:\\ProgramData\\AgentRunner\\claude",
     CLAUDE_CODE_USE_BEDROCK: "1",
+    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0",
+    AWS_BEARER_TOKEN_BEDROCK: "bedrock-token",
     AWS_REGION: "eu-central-1",
+    ANTHROPIC_BEDROCK_BASE_URL: "https://bedrock.example",
     CLAUDE_CODE_USE_VERTEX: "1",
+    CLOUD_ML_REGION: "europe-west1",
+    ANTHROPIC_VERTEX_PROJECT_ID: "vertex-project",
     GOOGLE_CLOUD_PROJECT: "test-project",
+    ANTHROPIC_FOUNDRY_API_KEY: "foundry-key",
+    ANTHROPIC_FOUNDRY_RESOURCE: "foundry-resource",
+    VERTEX_REGION_CLAUDE_4_6_SONNET: "europe-west4",
     SLACK_BOT_TOKEN: "slack-secret",
     DISCORD_BOT_TOKEN: "discord-secret",
   } as const;
@@ -190,13 +198,46 @@ test("Claude Code streams input/output, maps tools and usage, and resumes the du
   assert.equal(calls[0]?.options?.env?.CLAUDE_CODE_OAUTH_TOKEN, environment.CLAUDE_CODE_OAUTH_TOKEN);
   assert.equal(calls[0]?.options?.env?.CLAUDE_CONFIG_DIR, environment.CLAUDE_CONFIG_DIR);
   assert.equal(calls[0]?.options?.env?.CLAUDE_CODE_USE_BEDROCK, environment.CLAUDE_CODE_USE_BEDROCK);
+  assert.equal(calls[0]?.options?.env?.AWS_BEARER_TOKEN_BEDROCK, environment.AWS_BEARER_TOKEN_BEDROCK);
   assert.equal(calls[0]?.options?.env?.AWS_REGION, environment.AWS_REGION);
+  assert.equal(calls[0]?.options?.env?.ANTHROPIC_BEDROCK_BASE_URL, environment.ANTHROPIC_BEDROCK_BASE_URL);
   assert.equal(calls[0]?.options?.env?.CLAUDE_CODE_USE_VERTEX, environment.CLAUDE_CODE_USE_VERTEX);
+  assert.equal(calls[0]?.options?.env?.CLOUD_ML_REGION, environment.CLOUD_ML_REGION);
+  assert.equal(calls[0]?.options?.env?.ANTHROPIC_VERTEX_PROJECT_ID, environment.ANTHROPIC_VERTEX_PROJECT_ID);
   assert.equal(calls[0]?.options?.env?.GOOGLE_CLOUD_PROJECT, environment.GOOGLE_CLOUD_PROJECT);
+  assert.equal(calls[0]?.options?.env?.ANTHROPIC_FOUNDRY_API_KEY, environment.ANTHROPIC_FOUNDRY_API_KEY);
+  assert.equal(calls[0]?.options?.env?.ANTHROPIC_FOUNDRY_RESOURCE, environment.ANTHROPIC_FOUNDRY_RESOURCE);
+  assert.equal(calls[0]?.options?.env?.VERTEX_REGION_CLAUDE_4_6_SONNET, environment.VERTEX_REGION_CLAUDE_4_6_SONNET);
+  assert.equal(calls[0]?.options?.env?.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, "1");
   assert.equal(calls[0]?.options?.env?.SLACK_BOT_TOKEN, undefined);
   assert.equal(calls[0]?.options?.env?.DISCORD_BOT_TOKEN, undefined);
   assert.equal(closeCount, 2);
   await rm(root, { recursive: true, force: true });
+});
+
+test("Claude Code refuses to rebind a previously used OpenCode thread", async () => {
+  let preparedWorkspace = false;
+  const executor = new ClaudeCodeExecutor(
+    { workingRepository: ".", permissionMode: "acceptEdits" },
+    {
+      prepare: async () => {
+        preparedWorkspace = true;
+        return ".";
+      },
+      cleanup: async () => undefined,
+    },
+  );
+
+  await assert.rejects(
+    executor.prepareSession(
+      job(),
+      session({ executionGeneration: 1 }),
+      { onWorkingDirectory: () => undefined },
+      AbortSignal.timeout(2_000),
+    ),
+    (error: unknown) => error instanceof Error && error.message.includes("Cannot resume provider opencode"),
+  );
+  assert.equal(preparedWorkspace, false);
 });
 
 test("Claude Code cancellation aborts and closes the SDK query", async () => {

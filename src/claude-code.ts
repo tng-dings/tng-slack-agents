@@ -9,8 +9,8 @@ import {
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import type { ClaudeCodeConfig } from "./config.js";
+import { claudeChildEnvironment } from "./claude-environment.js";
 import { ClaudeCodeError } from "./errors.js";
-import { unprivilegedChildEnvironment } from "./environment.js";
 import type {
   ExecutionCallbacks,
   ExecutionResult,
@@ -25,35 +25,8 @@ import type { WorkspaceManager } from "./workspace.js";
 
 const PROVIDER_ID = "claude-code";
 const STDERR_TAIL_CHARACTERS = 4_000;
-const CLAUDE_ENVIRONMENT_NAMES = new Set([
-  "ANTHROPIC_API_KEY",
-  "ANTHROPIC_AUTH_TOKEN",
-  "ANTHROPIC_BASE_URL",
-  "CLAUDE_CODE_OAUTH_TOKEN",
-  "CLAUDE_CODE_USE_BEDROCK",
-  "CLAUDE_CODE_USE_FOUNDRY",
-  "CLAUDE_CODE_USE_VERTEX",
-  "CLAUDE_CONFIG_DIR",
-  "AWS_ACCESS_KEY_ID",
-  "AWS_PROFILE",
-  "AWS_REGION",
-  "AWS_SECRET_ACCESS_KEY",
-  "AWS_SESSION_TOKEN",
-  "GOOGLE_APPLICATION_CREDENTIALS",
-  "GOOGLE_CLOUD_PROJECT",
-  "GOOGLE_CLOUD_REGION",
-]);
-
 type QueryFactory = (parameters: Parameters<typeof query>[0]) => Query;
 type ClaudeWorkspaceManager = Pick<WorkspaceManager, "prepare" | "cleanup">;
-
-function childEnvironment(source: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const result = unprivilegedChildEnvironment(source);
-  for (const [name, value] of Object.entries(source)) {
-    if (value !== undefined && CLAUDE_ENVIRONMENT_NAMES.has(name.toUpperCase())) result[name] = value;
-  }
-  return result;
-}
 
 function appendBounded(current: string, chunk: string): string {
   const combined = current + chunk;
@@ -175,7 +148,10 @@ export class ClaudeCodeExecutor implements Executor {
     callbacks: SessionPreparationCallbacks,
     _signal: AbortSignal,
   ): Promise<PreparedExecutionSession> {
-    if (session.providerSessionId && session.providerId !== PROVIDER_ID) {
+    if (
+      session.providerId !== PROVIDER_ID &&
+      (session.providerSessionId !== null || session.executionGeneration > 0)
+    ) {
       throw new ClaudeCodeError(`Cannot resume provider ${session.providerId} with Claude Code`, "CLAUDE_CODE_PROVIDER_MISMATCH");
     }
     const workingDirectory = await this.workspaces.prepare(session.sessionKey, session.workingDirectory);
@@ -208,7 +184,7 @@ export class ClaudeCodeExecutor implements Executor {
       includePartialMessages: true,
       settingSources: ["user", "project", "local"],
       persistSession: true,
-      env: childEnvironment(process.env),
+      env: claudeChildEnvironment(process.env),
       stderr: (chunk) => { stderrTail = appendBounded(stderrTail, chunk); },
       ...permissionOptions(this.config),
       ...(freshSession ? { sessionId: session.providerSessionId } : { resume: session.providerSessionId }),

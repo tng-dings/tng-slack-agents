@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import type { PermissionMode } from "@anthropic-ai/claude-agent-sdk";
+import { claudeCredentialValues } from "./claude-environment.js";
 import type { AuthorizationDecision, AuthorizationPolicy, IntegrationId, JobSubmission } from "./types.js";
 
 export interface IntegrationAuthorization {
@@ -122,6 +123,7 @@ export interface RunnerSecrets {
   slackAppToken?: string;
   slackSigningSecret?: string;
   openCodePassword: string;
+  providerCredentials?: string[];
 }
 
 const defaults = {
@@ -383,6 +385,10 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
     };
   }
 
+  const claudeModel = claudeCode?.model === undefined
+    ? undefined
+    : string(claudeCode.model, "claudeCode.model").trim();
+
   const providerConfig = executor === "opencode" ? {
     executor,
     workingRepository: resolvePath(openCode!.workingRepository, "openCode.workingRepository", baseDirectory),
@@ -399,9 +405,7 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
     claudeCode: {
       workingRepository: resolvePath(claudeCode!.workingRepository, "claudeCode.workingRepository", baseDirectory),
       permissionMode: claudePermissionMode(claudeCode!.permissionMode),
-      ...(typeof claudeCode!.model === "string" && claudeCode!.model.trim()
-        ? { model: claudeCode!.model.trim() }
-        : {}),
+      ...(claudeModel ? { model: claudeModel } : {}),
       ...(claudeCode!.executablePath !== undefined
         ? { executablePath: resolvePath(claudeCode!.executablePath, "claudeCode.executablePath", baseDirectory) }
         : {}),
@@ -518,6 +522,7 @@ export function loadSecrets(config: RunnerConfig): RunnerSecrets {
   }
   return {
     openCodePassword: openCodePassword ?? "",
+    ...(config.executor === "claude-code" ? { providerCredentials: claudeCredentialValues() } : {}),
     ...(discordBotToken ? { discordBotToken } : {}),
     ...(discordPublicKey ? { discordPublicKey } : {}),
     ...(slackBotToken ? { slackBotToken } : {}),
