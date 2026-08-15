@@ -17,6 +17,7 @@ The cost of this model is that the workspace ends up with one bot per tester, an
 - Windows with Node.js 22.13 or later, Git, and a Slack account in the test workspace.
 - Permission from the workspace administrator to create and install an internal app. See the [Slack administrator checklist](slack-admin-checklist.md); the administrator approves the app definition once and then approves each tester's install.
 - A **disposable** Git repository with at least one commit, checked out locally. The agent runs unsandboxed shell commands and edits files in worktrees of this repository. Do not point it at anything you cannot afford to lose or leak.
+- Expect that repository to accumulate one `agent-runner/<session-hash>` branch per Slack thread. Nothing is committed, pushed, or merged for you, and retention removes only clean worktrees while leaving their branches in place, so you delete them yourself when you are done.
 - OpenCode installed (`npm install -g opencode-ai`) and a working model provider.
 
 ## 1. Create your own Slack app
