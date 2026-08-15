@@ -72,4 +72,4 @@ Run once by the operator. The behavior verified here is a property of the runner
 - [ ] Every Definition-of-Done acceptance check has evidence or a tracked defect.
 - [ ] Native Windows execution remains limited to trusted testers until a WSL/VM worker sandbox is available.
 
-The prose request suitable for sending to administrators is retained in [`docs/slack-admin-checklist.md`](../docs/slack-admin-checklist.md).
+The prose request suitable for sending to administrators is retained in [`docs/slack-admin-checklist.md`](../docs/slack-admin-checklist.md). Decisions and unresolved questions for running several testers at once are tracked in [`multi-tester-rollout.md`](multi-tester-rollout.md).
