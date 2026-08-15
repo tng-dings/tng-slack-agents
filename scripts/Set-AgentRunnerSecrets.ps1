@@ -10,7 +10,11 @@ param(
     [ValidateSet("gateway", "http")]
     [string]$DiscordIngress = "gateway",
     [Alias("AdditionalSecretNames")]
-    [string[]]$WorkerSecretNames = @()
+    [string[]]$WorkerSecretNames = @(),
+    [ValidateSet("opencode", "claude-code")]
+    [string]$Executor = "opencode",
+    [ValidateSet("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")]
+    [string]$ClaudeCredentialName = "ANTHROPIC_API_KEY"
 )
 
 $ErrorActionPreference = "Stop"
@@ -31,7 +35,10 @@ function Assert-Identity([string]$Identity) {
         [void](New-Object Security.Principal.NTAccount($Identity)).Translate([Security.Principal.SecurityIdentifier])
     }
     catch {
-        throw "Windows identity '$Identity' does not exist. Install both WinSW services before provisioning secrets."
+        if ($Executor -eq "opencode") {
+            throw "Windows identity '$Identity' does not exist. Install both WinSW services before provisioning secrets."
+        }
+        throw "Windows identity '$Identity' does not exist. Install the AgentRunner WinSW service before provisioning secrets."
     }
 }
 
@@ -82,7 +89,9 @@ function Write-ProtectedSecrets([string]$Path, [hashtable]$Secrets, [string]$Rea
 }
 
 Assert-Identity $GatewayServiceIdentity
-Assert-Identity $WorkerServiceIdentity
+if ($Executor -eq "opencode") {
+    Assert-Identity $WorkerServiceIdentity
+}
 
 foreach ($secretName in $WorkerSecretNames) {
     if ($secretName -notmatch '^[A-Z][A-Z0-9_]+$') {
@@ -104,15 +113,29 @@ foreach ($secretName in $WorkerSecretNames) {
         throw "WorkerSecretNames must contain provider credentials only: $secretName"
     }
 }
+if ($Executor -eq "claude-code" -and $WorkerSecretNames.Count -gt 0) {
+    throw "WorkerSecretNames is available only when Executor is opencode"
+}
 
 Set-RestrictedDirectoryAcl $GatewayDataDirectory @($GatewayServiceIdentity)
-Set-RestrictedDirectoryAcl $WorkerDataDirectory @($WorkerServiceIdentity) "ReadAndExecute"
-$worktreeDirectory = Join-Path $WorkerDataDirectory "worktrees"
-Set-RestrictedDirectoryAcl $worktreeDirectory @($GatewayServiceIdentity, $WorkerServiceIdentity)
+if ($Executor -eq "opencode") {
+    Set-RestrictedDirectoryAcl $WorkerDataDirectory @($WorkerServiceIdentity) "ReadAndExecute"
+    $worktreeDirectory = Join-Path $WorkerDataDirectory "worktrees"
+    Set-RestrictedDirectoryAcl $worktreeDirectory @($GatewayServiceIdentity, $WorkerServiceIdentity)
+}
+else {
+    Set-RestrictedDirectoryAcl (Join-Path $GatewayDataDirectory "claude") @($GatewayServiceIdentity)
+    Set-RestrictedDirectoryAcl (Join-Path $GatewayDataDirectory "worktrees") @($GatewayServiceIdentity)
+}
 
-$openCodePassword = Read-PlainSecret "OpenCode server password"
-$gatewaySecrets = @{
-    OPENCODE_SERVER_PASSWORD = $openCodePassword
+$openCodePassword = $null
+$gatewaySecrets = @{}
+if ($Executor -eq "opencode") {
+    $openCodePassword = Read-PlainSecret "OpenCode server password"
+    $gatewaySecrets.OPENCODE_SERVER_PASSWORD = $openCodePassword
+}
+else {
+    $gatewaySecrets[$ClaudeCredentialName] = Read-PlainSecret $ClaudeCredentialName
 }
 if ($SlackIngress -ne "disabled") {
     $gatewaySecrets.SLACK_BOT_TOKEN = Read-PlainSecret "Slack bot token (xoxb-...)"
@@ -129,20 +152,30 @@ if ($EnableDiscord) {
         $gatewaySecrets.DISCORD_PUBLIC_KEY = Read-PlainSecret "Discord application public key"
     }
 }
-$workerSecrets = @{
-    OPENCODE_SERVER_PASSWORD = $openCodePassword
-}
-foreach ($secretName in $WorkerSecretNames) {
-    $workerSecrets[$secretName] = Read-PlainSecret $secretName
+$workerSecrets = $null
+if ($Executor -eq "opencode") {
+    $workerSecrets = @{
+        OPENCODE_SERVER_PASSWORD = $openCodePassword
+    }
+    foreach ($secretName in $WorkerSecretNames) {
+        $workerSecrets[$secretName] = Read-PlainSecret $secretName
+    }
 }
 
 try {
     Write-ProtectedSecrets (Join-Path $GatewayDataDirectory "gateway-secrets.bin") $gatewaySecrets $GatewayServiceIdentity
-    Write-ProtectedSecrets (Join-Path $WorkerDataDirectory "worker-secrets.bin") $workerSecrets $WorkerServiceIdentity
+    if ($Executor -eq "opencode") {
+        Write-ProtectedSecrets (Join-Path $WorkerDataDirectory "worker-secrets.bin") $workerSecrets $WorkerServiceIdentity
+    }
 }
 finally {
     $openCodePassword = $null
 }
 
 Write-Host "Gateway secrets written for $GatewayServiceIdentity."
-Write-Host "Worker secrets written for $WorkerServiceIdentity; no Slack or Discord credential is present in the worker bundle."
+if ($Executor -eq "opencode") {
+    Write-Host "Worker secrets written for $WorkerServiceIdentity; no Slack or Discord credential is present in the worker bundle."
+}
+else {
+    Write-Host "Claude credential $ClaudeCredentialName written to the AgentRunner bundle; no OpenCode worker bundle was created."
+}

@@ -2,6 +2,7 @@
 param(
     [string]$GatewayDataDirectory = "$env:ProgramData\AgentRunner",
     [string]$WorkerDataDirectory = "$env:ProgramData\OpenCodeWorker",
+    [string]$ClaudeConfigDirectory = "",
     [string]$ConfigPath = "$env:ProgramData\AgentRunner\config.json",
     [string]$EdgeConfigPath = "",
     [string]$NginxPath = "nginx"
@@ -44,40 +45,84 @@ function Resolve-ConfiguredPath([string]$Candidate, [string]$ConfigurationPath) 
     return [IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $ConfigurationPath) $expanded))
 }
 
+function Test-RestrictedAcl([string]$Path, [string[]]$AllowedIdentities) {
+    if (-not (Test-Path $Path)) { return $false }
+    $unexpectedAllows = @((Get-Acl $Path).Access | Where-Object {
+        $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+        $_.IdentityReference.Value -notin $AllowedIdentities
+    })
+    return $unexpectedAllows.Count -eq 0
+}
+
+$config = $null
+$executor = "opencode"
+if (Test-Path $ConfigPath) {
+    $config = Get-Content -Raw $ConfigPath | ConvertFrom-Json
+    if (-not [string]::IsNullOrWhiteSpace([string]$config.executor)) {
+        $executor = [string]$config.executor
+    }
+    Assert-Control ($executor -in @("opencode", "claude-code")) "executor is opencode or claude-code"
+}
+if ([string]::IsNullOrWhiteSpace($ClaudeConfigDirectory)) {
+    $ClaudeConfigDirectory = Join-Path $GatewayDataDirectory "claude"
+}
+
 $gatewayService = Get-CimInstance Win32_Service -Filter "Name='AgentRunner'" -ErrorAction SilentlyContinue
-$workerService = Get-CimInstance Win32_Service -Filter "Name='OpenCodeServer'" -ErrorAction SilentlyContinue
 Assert-Control ($gatewayService -and $gatewayService.StartName -eq "NT SERVICE\AgentRunner") "AgentRunner uses its dedicated virtual identity"
-Assert-Control ($workerService -and $workerService.StartName -eq "NT SERVICE\OpenCodeServer") "OpenCodeServer uses its dedicated virtual identity"
-
 $gatewayAclNames = @((Get-Acl $GatewayDataDirectory).Access.IdentityReference.Value)
-$workerAclNames = @((Get-Acl $WorkerDataDirectory).Access.IdentityReference.Value)
-$worktreeAclNames = @((Get-Acl (Join-Path $WorkerDataDirectory "worktrees")).Access.IdentityReference.Value)
-Assert-Control ($gatewayAclNames -notcontains "NT SERVICE\OpenCodeServer") "worker identity cannot access the gateway data directory"
-Assert-Control ($workerAclNames -notcontains "NT SERVICE\AgentRunner") "gateway identity cannot access the worker control directory"
-Assert-Control ($worktreeAclNames -contains "NT SERVICE\AgentRunner" -and $worktreeAclNames -contains "NT SERVICE\OpenCodeServer") "only the shared worktree area is available to both services"
-
 $gatewaySecretPath = Join-Path $GatewayDataDirectory "gateway-secrets.bin"
 $workerSecretPath = Join-Path $WorkerDataDirectory "worker-secrets.bin"
 Assert-Control (Test-Path $gatewaySecretPath) "gateway secret bundle exists"
-Assert-Control (Test-Path $workerSecretPath) "worker secret bundle exists"
 
 if (Test-Path $gatewaySecretPath) {
     $names = Read-SecretNames $gatewaySecretPath
-    Assert-Control ($names -contains "OPENCODE_SERVER_PASSWORD") "gateway bundle contains its OpenCode client credential"
     $aclNames = @((Get-Acl $gatewaySecretPath).Access.IdentityReference.Value)
-    Assert-Control ($aclNames -notcontains "NT SERVICE\OpenCodeServer") "worker identity cannot read gateway secret bundle"
-}
-if (Test-Path $workerSecretPath) {
-    $names = Read-SecretNames $workerSecretPath
-    Assert-Control (-not ($names | Where-Object { $_ -like "SLACK_*" })) "worker bundle contains no Slack credential"
-    Assert-Control (-not ($names | Where-Object { $_ -like "DISCORD_*" })) "worker bundle contains no Discord credential"
-    Assert-Control ($names -contains "OPENCODE_SERVER_PASSWORD") "worker bundle contains its server password"
-    $aclNames = @((Get-Acl $workerSecretPath).Access.IdentityReference.Value)
-    Assert-Control ($aclNames -notcontains "NT SERVICE\AgentRunner") "gateway identity cannot read worker secret bundle"
+    Assert-Control (Test-RestrictedAcl $gatewaySecretPath @("NT AUTHORITY\SYSTEM", "BUILTIN\Administrators", "NT SERVICE\AgentRunner")) "gateway secret bundle is not broadly readable"
 }
 
-if (Test-Path $ConfigPath) {
-    $config = Get-Content -Raw $ConfigPath | ConvertFrom-Json
+if ($executor -eq "opencode") {
+    $workerService = Get-CimInstance Win32_Service -Filter "Name='OpenCodeServer'" -ErrorAction SilentlyContinue
+    Assert-Control ($workerService -and $workerService.StartName -eq "NT SERVICE\OpenCodeServer") "OpenCodeServer uses its dedicated virtual identity"
+    $workerAclNames = @((Get-Acl $WorkerDataDirectory).Access.IdentityReference.Value)
+    $worktreeAclNames = @((Get-Acl (Join-Path $WorkerDataDirectory "worktrees")).Access.IdentityReference.Value)
+    Assert-Control ($gatewayAclNames -notcontains "NT SERVICE\OpenCodeServer") "worker identity cannot access the gateway data directory"
+    Assert-Control ($workerAclNames -notcontains "NT SERVICE\AgentRunner") "gateway identity cannot access the worker control directory"
+    Assert-Control ($worktreeAclNames -contains "NT SERVICE\AgentRunner" -and $worktreeAclNames -contains "NT SERVICE\OpenCodeServer") "only the shared worktree area is available to both services"
+    Assert-Control (Test-Path $workerSecretPath) "worker secret bundle exists"
+    if (Test-Path $gatewaySecretPath) {
+        $names = Read-SecretNames $gatewaySecretPath
+        Assert-Control ($names -contains "OPENCODE_SERVER_PASSWORD") "gateway bundle contains its OpenCode client credential"
+        $aclNames = @((Get-Acl $gatewaySecretPath).Access.IdentityReference.Value)
+        Assert-Control ($aclNames -notcontains "NT SERVICE\OpenCodeServer") "worker identity cannot read gateway secret bundle"
+    }
+    if (Test-Path $workerSecretPath) {
+        $names = Read-SecretNames $workerSecretPath
+        Assert-Control (-not ($names | Where-Object { $_ -like "SLACK_*" })) "worker bundle contains no Slack credential"
+        Assert-Control (-not ($names | Where-Object { $_ -like "DISCORD_*" })) "worker bundle contains no Discord credential"
+        Assert-Control ($names -contains "OPENCODE_SERVER_PASSWORD") "worker bundle contains its server password"
+        $aclNames = @((Get-Acl $workerSecretPath).Access.IdentityReference.Value)
+        Assert-Control ($aclNames -notcontains "NT SERVICE\AgentRunner") "gateway identity cannot read worker secret bundle"
+    }
+}
+elseif ($executor -eq "claude-code") {
+    Assert-Control ($gatewayAclNames -contains "NT SERVICE\AgentRunner") "AgentRunner owns access to its data directory"
+    Assert-Control (Test-Path $ClaudeConfigDirectory) "persistent Claude config directory exists"
+    if (Test-Path $ClaudeConfigDirectory) {
+        $claudeAclNames = @((Get-Acl $ClaudeConfigDirectory).Access.IdentityReference.Value)
+        Assert-Control ($claudeAclNames -contains "NT SERVICE\AgentRunner") "AgentRunner owns access to its Claude config directory"
+        Assert-Control (Test-RestrictedAcl $ClaudeConfigDirectory @("NT AUTHORITY\SYSTEM", "BUILTIN\Administrators", "NT SERVICE\AgentRunner")) "Claude config directory is not broadly readable"
+    }
+    if (Test-Path $gatewaySecretPath) {
+        $names = Read-SecretNames $gatewaySecretPath
+        $claudeCredentialNames = @($names | Where-Object { $_ -in @("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN") })
+        Assert-Control ($claudeCredentialNames.Count -eq 1) "gateway bundle contains exactly one supported Claude credential"
+        Assert-Control ($names -notcontains "OPENCODE_SERVER_PASSWORD") "Claude gateway bundle does not require an OpenCode password"
+    }
+    Assert-Control $true "Claude Code mode does not require an OpenCodeServer service"
+    Assert-Control $true "Claude Code mode does not require an OpenCode worker bundle"
+}
+
+if ($config) {
     $slackEnabled = $config.slack.enabled -ne $false
     $discordEnabled = $config.discord.enabled -eq $true
     $slackIngress = if ($config.slack.ingress) { [string]$config.slack.ingress } else { "socket" }
@@ -102,8 +147,10 @@ if (Test-Path $ConfigPath) {
         }
     }
     $resolvedConfigPath = [IO.Path]::GetFullPath($ConfigPath)
-    $baseUrl = [Uri]$config.openCode.baseUrl
-    Assert-Control ($baseUrl.Scheme -eq "http" -and $baseUrl.Host -in @("127.0.0.1", "::1")) "OpenCode endpoint is a loopback literal"
+    if ($executor -eq "opencode") {
+        $baseUrl = [Uri]$config.openCode.baseUrl
+        Assert-Control ($baseUrl.Scheme -eq "http" -and $baseUrl.Host -in @("127.0.0.1", "::1")) "OpenCode endpoint is a loopback literal"
+    }
     if ($slackEnabled) {
         Assert-Control (@($config.slack.allowedWorkspaceIds).Count -gt 0) "Slack workspace allowlist is configured"
         Assert-Control (@($config.slack.allowedUserIds).Count -gt 0) "Slack user allowlist is configured"
@@ -127,7 +174,19 @@ if (Test-Path $ConfigPath) {
     Assert-Control ([int]$config.storage.retentionDays -le 30) "retention is at most 30 days"
     Assert-Control (Test-IsWithin (Resolve-ConfiguredPath $config.storage.databasePath $resolvedConfigPath) $GatewayDataDirectory) "SQLite storage is inside the gateway data directory"
     Assert-Control (Test-IsWithin (Resolve-ConfiguredPath $config.storage.auditLogPath $resolvedConfigPath) $GatewayDataDirectory) "JSONL audit storage is inside the gateway data directory"
-    Assert-Control (Test-IsWithin (Resolve-ConfiguredPath $config.storage.worktreeRoot $resolvedConfigPath) $WorkerDataDirectory) "worktree storage is inside the worker data directory"
+    $resolvedWorktreeRoot = Resolve-ConfiguredPath $config.storage.worktreeRoot $resolvedConfigPath
+    if ($executor -eq "opencode") {
+        Assert-Control (Test-IsWithin $resolvedWorktreeRoot $WorkerDataDirectory) "worktree storage is inside the worker data directory"
+    }
+    else {
+        Assert-Control (Test-IsWithin $resolvedWorktreeRoot $GatewayDataDirectory) "Claude worktree storage is inside the AgentRunner data directory"
+        Assert-Control (Test-Path $resolvedWorktreeRoot) "Claude worktree storage exists"
+        if (Test-Path $resolvedWorktreeRoot) {
+            $worktreeAclNames = @((Get-Acl $resolvedWorktreeRoot).Access.IdentityReference.Value)
+            Assert-Control ($worktreeAclNames -contains "NT SERVICE\AgentRunner") "AgentRunner can access the Claude worktree area"
+            Assert-Control (Test-RestrictedAcl $resolvedWorktreeRoot @("NT AUTHORITY\SYSTEM", "BUILTIN\Administrators", "NT SERVICE\AgentRunner")) "Claude worktree area is not broadly readable"
+        }
+    }
 
     if ($slackEnabled -and $slackIngress -eq "events-api") {
         $http = $config.slack.http

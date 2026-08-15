@@ -2,9 +2,9 @@
 
 ## Executive summary
 
-**Company Coding Agent** accepts allowlisted Slack direct messages and Discord agent-thread conversations and submits coding tasks to a company-managed OpenCode worker. The preferred Slack Socket Mode and Discord Gateway transports are outbound connections with no public inbound HTTP endpoint; optional Slack Events API and legacy Discord HTTP modes use the separately reviewed edge controls below.
+**Company Coding Agent** accepts allowlisted Slack direct messages and Discord agent-thread conversations and submits coding tasks to either a company-managed OpenCode worker or an in-process Claude Code executor. The preferred Slack Socket Mode and Discord Gateway transports are outbound connections with no public inbound HTTP endpoint; optional Slack Events API and legacy Discord HTTP modes use the separately reviewed edge controls below.
 
-The integration gateway and coding worker are separate Windows security principals. Enabled Slack and Discord credentials exist only in the gateway bundle and process. The OpenCode worker receives only its localhost server password and the separately approved model-provider credential. A deploy-time validation script verifies this separation without printing secret values.
+In OpenCode mode, the integration gateway and coding worker are separate Windows security principals. Enabled Slack and Discord credentials exist only in the gateway bundle and process, and the worker receives only its localhost password and approved provider credential. In Claude mode, the selected Claude credential shares AgentRunner's DPAPI bundle and OS identity with the integration gateway. Child-environment filtering excludes integration tokens from the SDK subprocess, but does not create an OS security boundary. A deploy-time validation script applies the checks for the selected executor without printing secret values.
 
 The requested approval scope is one Slack workspace and/or Discord guild, one named tester, and one disposable or backed-up repository.
 
@@ -38,7 +38,15 @@ Allowlisted Slack DM (text and optional image attachments)
   -> redacted and bounded response to the originating Slack DM thread
 ```
 
-No Slack or Discord credential crosses the localhost worker boundary. Gateway Git subprocesses receive an explicit allowlist of non-secret environment variables.
+With `executor: "claude-code"`, the executor leg is instead:
+
+```text
+AgentRunner (integration credentials, selected Claude credential, branch-backed worktree)
+  -> in-process Claude Agent SDK -> Claude child process under NT SERVICE\AgentRunner
+  -> approved model provider
+```
+
+In OpenCode mode no Slack or Discord credential crosses the localhost worker boundary. In Claude mode the SDK child environment omits those values, but Claude still runs as AgentRunner and may potentially access resources available to that identity. Gateway Git subprocesses receive an explicit allowlist of non-secret environment variables.
 
 ```text
 Allowlisted Discord guild /agent command (required prompt, optional image)
@@ -49,7 +57,7 @@ Allowlisted Discord guild /agent command (required prompt, optional image)
   -> redacted and bounded public bot message in the originating channel/thread
 ```
 
-No Discord credential or interaction token crosses the localhost worker boundary.
+No Discord interaction token is persisted. OpenCode mode keeps the bot credential outside the worker identity; Claude mode relies on subprocess filtering within the shared AgentRunner identity.
 
 ## Slack permissions
 
@@ -80,23 +88,20 @@ The version-controlled scope definition is [`slack/manifest.json`](../slack/mani
 
 ## Secrets and process isolation
 
-| Secret | Owner | Exposed to OpenCode |
+| Secret | OpenCode mode | Claude Code mode |
 | --- | --- | --- |
-| Slack bot token | `NT SERVICE\AgentRunner` | No |
-| Slack app-level token | `NT SERVICE\AgentRunner` | No |
-| Slack signing secret (Events API only) | `NT SERVICE\AgentRunner` | No |
-| Discord bot token | `NT SERVICE\AgentRunner` | No |
-| Discord application public key (legacy HTTP ingress only) | `NT SERVICE\AgentRunner` | No |
-| OpenCode client/server password | Both, in separate bundles | Yes, by design |
-| Model-provider credential | `NT SERVICE\OpenCodeServer` | Yes, accepted MVP risk |
+| Slack bot/app/signing credentials | AgentRunner only; excluded from worker | AgentRunner bundle/process; omitted from SDK child environment |
+| Discord bot/public-key credentials | AgentRunner only; excluded from worker | AgentRunner bundle/process; omitted from SDK child environment |
+| OpenCode client/server password | Both principals, in separate bundles | Not required |
+| Model-provider credential | `NT SERVICE\OpenCodeServer` | `NT SERVICE\AgentRunner` |
 
 Evidence:
 
-- [`Set-AgentRunnerSecrets.ps1`](../scripts/Set-AgentRunnerSecrets.ps1) creates independently encrypted, ACLed bundles.
+- [`Set-AgentRunnerSecrets.ps1`](../scripts/Set-AgentRunnerSecrets.ps1) creates independently encrypted, ACLed bundles for OpenCode or one AgentRunner bundle plus a persistent Claude configuration directory for Claude Code.
 - [`Start-AgentRunner.ps1`](../scripts/Start-AgentRunner.ps1) reads only `gateway-secrets.bin`.
 - [`Start-OpenCode.ps1`](../scripts/Start-OpenCode.ps1) reads only `worker-secrets.bin` and refuses `SLACK_*` and `DISCORD_*` entries.
 - [`environment.ts`](../src/environment.ts) prevents gateway secrets from reaching Git child processes.
-- WinSW definitions use distinct Windows virtual accounts.
+- OpenCode's WinSW definitions use distinct Windows virtual accounts. Claude Code requires only the AgentRunner service.
 
 ## Data handling
 
@@ -105,10 +110,10 @@ Evidence:
 - Tool audit records contain tool name, call ID, and status rather than tool input/output.
 - Audit payload size is capped.
 - Completed job prompt/output content is removed by default.
-- Jobs, usage aggregates, SQLite/JSONL audit events, and OpenCode session/message data are deleted after the configured retention period; the approval configuration uses 30 days. Expired worktrees are removed only when clean, while their local branches remain available for reattachment and dirty worktrees are retained.
+- Jobs, usage aggregates, SQLite/JSONL audit events, and provider-session data are deleted after the configured retention period; the approval configuration uses 30 days. Expired worktrees are removed only when clean, while their local branches remain available for reattachment and dirty worktrees are retained.
 - Data directories are restricted to administrators, SYSTEM, and the owning service identity.
 
-## Worker controls
+## Executor controls
 
 - OpenCode accepts only an HTTP loopback literal; remote hosts, URL credentials, paths, queries, fragments, and redirects are rejected.
 - HTTP Basic authentication uses a high-entropy password shared only between the two service bundles.
@@ -116,6 +121,7 @@ Evidence:
 - A deterministic `agent-runner/<session-hash>` branch and worktree are used per normalized Slack/Discord session, with per-session serialization.
 - Global/per-user concurrency, queue, timeout, output, and reported-cost limits are enforced.
 - Integration delivery failure cannot change a successful execution result or trigger an automatic replay.
+- Claude Code persists its configuration under `%ProgramData%\AgentRunner\claude`, uses a fixed provider-variable allowlist, and defaults to unattended `bypassPermissions`. It does not require the OpenCode service or worker bundle.
 
 ## Deployment verification evidence
 
@@ -129,16 +135,17 @@ npm audit
 .\scripts\Test-AgentRunnerSecurity.ps1
 ```
 
-Archive the output with the approval ticket. The validation script checks service identities, bundle contents by key name, cross-service ACL exclusions, loopback configuration, allowlists, live-output settings, content retention, and retention duration. It never prints secret values.
+Archive the output with the approval ticket. The validation script detects the configured executor. OpenCode checks retain service-identity separation, split-bundle contents, cross-service ACL exclusions, and loopback configuration. Claude checks require exactly one supported Claude credential, no OpenCode password, a restricted persistent Claude directory, and an AgentRunner-only worktree area; no OpenCode service or worker bundle is required. Shared checks cover allowlists, live-output settings, content retention, and retention duration. Secret values are never printed.
 
 ## Residual risks requiring reviewer acknowledgement
 
-1. The model-provider credential is available to the coding worker. It must be narrowly scoped, provider-budget-limited, and rotated after testing.
-2. Worker outbound network access is not restricted for the MVP. The owner explicitly accepts possible exfiltration of the provider credential or accessible source because the worker runs on a dedicated Windows machine containing only the approved code and worker credential.
-3. Native Windows service isolation is weaker than a dedicated VM. Testing is restricted to one trusted user and a disposable/backed-up repository until a VM worker is deployed.
-4. The worker intentionally has shell/edit capability. Repository scripts and dependencies are executable content.
-5. Source and prompts are transmitted to the separately approved model provider.
-6. Slack and Discord token rotation is manual for the MVP. The incident owner can revoke enabled platform tokens immediately.
+1. The model-provider credential is available to the selected executor. It must be narrowly scoped, provider-budget-limited, and rotated after testing.
+2. In Claude mode, in-process Claude and its tools run with `bypassPermissions` under `NT SERVICE\AgentRunner`. They can potentially access the AgentRunner DPAPI bundle and every other resource available to that identity. Subprocess environment filtering does not mitigate that identity-level access.
+3. Executor outbound network access is not restricted for the MVP. The owner explicitly accepts possible exfiltration of credentials or accessible source from the dedicated Windows machine.
+4. Native Windows service isolation is weaker than a dedicated VM. Testing is restricted to one trusted user and a disposable/backed-up repository until a VM worker is deployed.
+5. The executor intentionally has shell/edit capability. Repository scripts and dependencies are executable content.
+6. Source and prompts are transmitted to the separately approved model provider.
+7. Slack and Discord token rotation is manual for the MVP. The incident owner can revoke enabled platform tokens immediately.
 
 ## Approval requested
 

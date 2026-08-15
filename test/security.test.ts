@@ -50,9 +50,42 @@ test("configuration accepts only an explicit OpenCode version allowlist", async 
     storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
   };
   await writeFile(filename, JSON.stringify(config));
-  assert.deepEqual((await loadConfig(filename)).openCode.approvedVersions, ["1.2.3", "1.2.4"]);
+  const loaded = await loadConfig(filename);
+  assert.equal(loaded.executor, "opencode");
+  assert.deepEqual(loaded.executor === "opencode" ? loaded.openCode.approvedVersions : [], ["1.2.3", "1.2.4"]);
   await writeFile(filename, JSON.stringify({ ...config, openCode: { ...config.openCode, approvedVersions: [""] } }));
   await assert.rejects(loadConfig(filename), /openCode\.approvedVersions/);
+  await rm(root, { recursive: true, force: true });
+});
+
+test("configuration selects Claude Code without OpenCode settings or password", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-claude-config-"));
+  const filename = path.join(root, "config.json");
+  await writeFile(filename, JSON.stringify({
+    executor: "claude-code",
+    slack: { enabled: false, allowedWorkspaceIds: [], allowedUserIds: [] },
+    claudeCode: { workingRepository: root, model: "claude-sonnet-4-5" },
+    storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
+  }));
+  const previousPassword = process.env.OPENCODE_SERVER_PASSWORD;
+  delete process.env.OPENCODE_SERVER_PASSWORD;
+  try {
+    const loaded = await loadConfig(filename);
+    assert.equal(loaded.executor, "claude-code");
+    if (loaded.executor !== "claude-code") throw new Error("Expected Claude Code configuration");
+    assert.equal(loaded.claudeCode.model, "claude-sonnet-4-5");
+    assert.equal(loaded.claudeCode.permissionMode, "bypassPermissions");
+    assert.equal(loadSecrets(loaded).openCodePassword, "");
+  } finally {
+    if (previousPassword === undefined) delete process.env.OPENCODE_SERVER_PASSWORD;
+    else process.env.OPENCODE_SERVER_PASSWORD = previousPassword;
+  }
+  await writeFile(filename, JSON.stringify({
+    executor: "unknown",
+    slack: { enabled: false, allowedWorkspaceIds: [], allowedUserIds: [] },
+    storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
+  }));
+  await assert.rejects(loadConfig(filename), /executor must be/);
   await rm(root, { recursive: true, force: true });
 });
 
@@ -299,6 +332,39 @@ test("OpenCode launcher is wired only to the worker secret bundle", async () => 
   assert.match(gatewayLauncher, /gateway-secrets\.bin/);
   assert.match(workerService, /NT SERVICE\\OpenCodeServer/);
   assert.match(gatewayService, /NT SERVICE\\AgentRunner/);
+});
+
+test("Windows service provisioning accepts only supported Claude credentials and keeps OpenCode as the default", async () => {
+  const provisioner = await readFile("scripts/Set-AgentRunnerSecrets.ps1", "utf8");
+  const launcher = await readFile("scripts/Start-AgentRunner.ps1", "utf8");
+  const securityAudit = await readFile("scripts/Test-AgentRunnerSecurity.ps1", "utf8");
+  const service = await readFile("service/AgentRunner.xml", "utf8");
+
+  assert.match(provisioner, /\[ValidateSet\("opencode", "claude-code"\)\]\s*\[string\]\$Executor = "opencode"/);
+  assert.match(
+    provisioner,
+    /\[ValidateSet\("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"\)\]\s*\[string\]\$ClaudeCredentialName = "ANTHROPIC_API_KEY"/,
+  );
+  const credentialValidation = provisioner.match(
+    /\[ValidateSet\(([^\r\n]+)\)\]\s*\[string\]\$ClaudeCredentialName/,
+  );
+  assert.deepEqual(credentialValidation?.[1]?.match(/[A-Z][A-Z0-9_]+/g), [
+    "ANTHROPIC_API_KEY",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+  ]);
+  assert.match(provisioner, /if \(\$Executor -eq "opencode"\) \{\s*Assert-Identity \$WorkerServiceIdentity/);
+  assert.match(provisioner, /Join-Path \$GatewayDataDirectory "claude"/);
+  assert.match(provisioner, /\$gatewaySecrets\[\$ClaudeCredentialName\] = Read-PlainSecret \$ClaudeCredentialName/);
+  assert.match(provisioner, /no OpenCode worker bundle was created/);
+
+  assert.match(launcher, /\$executor -eq "claude-code"/);
+  assert.match(launcher, /CLAUDE_CONFIG_DIR = Join-Path \$DataDirectory "claude"/);
+  assert.match(launcher, /foreach \(\$name in \$injectedEnvironmentNames\)/);
+  assert.match(securityAudit, /if \(\$executor -eq "opencode"\)/);
+  assert.match(securityAudit, /elseif \(\$executor -eq "claude-code"\)/);
+  assert.match(securityAudit, /does not require an OpenCodeServer service/);
+  assert.match(securityAudit, /gateway bundle contains exactly one supported Claude credential/);
+  assert.doesNotMatch(service, /OpenCode agent runner/);
 });
 
 test("Slack manifest includes files:read for screenshot support", async () => {

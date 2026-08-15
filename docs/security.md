@@ -2,14 +2,15 @@
 
 ## Trust boundaries
 
-The integration gateway/coordinator and OpenCode worker are separate security principals.
+The selected executor determines the process boundary. OpenCode uses separate integration-gateway and worker principals. Claude Code runs in-process with the AgentRunner principal.
 
 | Component | Secrets | Required access | Explicitly excluded |
 | --- | --- | --- | --- |
-| `AgentRunner` | Slack credentials when enabled; Discord bot token and, for legacy HTTP ingress, public key; OpenCode client password | Platform APIs, queue, audit data, worktree creation | Provider credentials |
+| `AgentRunner` with OpenCode | Slack credentials when enabled; Discord bot token and, for legacy HTTP ingress, public key; OpenCode client password | Platform APIs, queue, audit data, worktree creation | Provider credentials |
 | `OpenCodeServer` | Provider credential; OpenCode server password | Worktrees and approved provider network | Slack/Discord credentials, queue, audit data |
+| `AgentRunner` with Claude Code | Enabled integration credentials; selected Claude API key or OAuth token | Platform APIs, queue, audit data, worktrees, Claude config and provider network | No separate OS principal |
 
-The duplicated OpenCode password authenticates one loopback-only connection. It is not an integration credential. `%ProgramData%\AgentRunner\gateway-secrets.bin` and `%ProgramData%\OpenCodeWorker\worker-secrets.bin` use separate ACLs and Windows virtual service identities. The worker launcher rejects any `SLACK_*` or `DISCORD_*` entry as a defense-in-depth check.
+The duplicated OpenCode password authenticates one loopback-only connection. It is not an integration credential. `%ProgramData%\AgentRunner\gateway-secrets.bin` and `%ProgramData%\OpenCodeWorker\worker-secrets.bin` use separate ACLs and Windows virtual service identities. The worker launcher rejects any `SLACK_*` or `DISCORD_*` entry as a defense-in-depth check. Claude mode has no worker bundle or OpenCode service. Its selected credential is stored in the AgentRunner bundle, while `%ProgramData%\AgentRunner\claude` persists Claude configuration across service restarts.
 
 ## Enforced controls
 
@@ -24,6 +25,7 @@ The duplicated OpenCode password authenticates one loopback-only connection. It 
 - The private listener repeats the reviewed body/header/time/connection bounds before Bolt dispatch. Receiver rejection logs contain only rate-limited fixed categories, never parser text or request-controlled content.
 - OpenCode URLs are restricted to HTTP loopback literals, credentials/paths/query strings are rejected, and HTTP redirects are disabled.
 - Slack and Discord credentials never enter the worker secret bundle. Gateway Git subprocesses receive an allowlisted environment without gateway secrets.
+- The Claude SDK child receives only a fixed allowlist of provider variables plus the ordinary restricted child environment; Slack and Discord credentials are omitted. This is defense in depth, not a boundary between identities.
 - Runtime-inline OpenCode policy denies external-directory access, web tools, subagents, skills, and interactive questions; unknown tools require approval and are automatically rejected. Shell/edit access remains because this is a coding worker.
 - Unexpected OpenCode permission requests are rejected rather than approved through Slack.
 - Source and worktree paths are administrator-configured. Worktree directories and `agent-runner/<session-hash>` branch names are derived from the same truncated SHA-256 session hash, and Git is invoked with argument arrays rather than shell strings.
@@ -35,6 +37,7 @@ The duplicated OpenCode password authenticates one loopback-only connection. It 
 ## Residual accepted risks for the MVP
 
 - The provider credential is intentionally present in the OpenCode worker and can be exposed by a compromised worker. Use a narrowly scoped key with a low provider-side budget and rotate it after testing.
+- In Claude mode, `bypassPermissions` executes under `NT SERVICE\AgentRunner`. Claude can potentially access the AgentRunner DPAPI bundle, integration credentials in process memory, and every file or network resource granted to that identity. There is no separate Claude worker security principal.
 - Worker outbound network access is intentionally not restricted for this MVP. The owner accepts that the agent or repository code could exfiltrate its provider credential or accessible source; deployment is limited to a dedicated Windows machine with no other sensitive data.
 - Native Windows process and ACL isolation is not equivalent to a VM sandbox. OpenCode shell commands can access everything granted to `NT SERVICE\OpenCodeServer`.
 - Shell access is necessary for coding tasks. Repository scripts and dependencies are therefore executable content; use only a disposable or backed-up repository for MVP approval testing.
@@ -48,11 +51,11 @@ The duplicated OpenCode password authenticates one loopback-only connection. It 
 
 ## Mandatory operating conditions
 
-1. Install and run the services under the distinct virtual identities declared in the WinSW XML files.
-2. Provision secrets only with `Set-AgentRunnerSecrets.ps1`; do not recreate a shared blob.
+1. Install AgentRunner under its declared virtual identity. In OpenCode mode, also install OpenCodeServer under its distinct virtual identity.
+2. Provision secrets only with `Set-AgentRunnerSecrets.ps1`; keep the split bundles in OpenCode mode and use the single AgentRunner bundle only for the explicitly accepted Claude topology.
 3. Verify the ACLs and service identities using the commands in `docs/security-review.md` before adding a tester.
 4. Use one approved workspace, one allowlisted tester, a disposable repository, and a provider key with a hard external budget.
-5. Do not grant the worker read access to `%ProgramData%\AgentRunner` or the gateway read access to the worker secret file.
+5. In OpenCode mode, do not grant the worker read access to `%ProgramData%\AgentRunner` or the gateway read access to the worker secret file. In Claude mode, restrict the AgentRunner data, worktree, and Claude config directories to SYSTEM, Administrators, and AgentRunner.
 6. Revoke all enabled Slack/Discord credentials and provider credentials on suspected compromise.
 
-Before adding broader users or valuable repositories, move the worker into a VM or similarly hardened boundary and enforce outbound network policy or a provider proxy.
+Before adding broader users or valuable repositories, move execution into a VM or similarly hardened boundary and enforce outbound network policy or a provider proxy.
