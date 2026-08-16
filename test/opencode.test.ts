@@ -12,7 +12,7 @@ import { OpenCodeExecutor } from "../src/opencode.js";
 import { parseEvent, parseMessage } from "../src/opencode-protocol.js";
 import { AgentRunner } from "../src/runner.js";
 import { WorkspaceManager } from "../src/workspace.js";
-import { testAuthorizationPolicy, testConfig, waitFor } from "./helpers.js";
+import { persistSessionExecution, testAuthorizationPolicy, testConfig, waitFor } from "./helpers.js";
 
 function openCodeSession(id: string, directory: string, title = "Test session") {
   return {
@@ -595,7 +595,7 @@ test("OpenCode reconciliation aborts an interrupted session and confirms idle st
     actorId: "U_ALLOWED",
     prompt: "interrupted",
   });
-  database.updateSessionExecution(job.sessionKey, "opencode", "interrupted-session", path.join(root, "worktree"));
+  persistSessionExecution(database, job.sessionKey, "opencode", "interrupted-session", path.join(root, "worktree"));
   const audit = new AuditLogger(config.storage.auditLogPath, database, ["test-password"]);
   const executor = new OpenCodeExecutor(
     config.openCode,

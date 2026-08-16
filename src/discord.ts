@@ -12,30 +12,23 @@ export { DiscordAdapter, type DiscordAdapterOptions, type DiscordInteractionPrep
 export {
   DiscordApiClient,
   DiscordJobReporter,
-  discordMessageChunks,
   type DiscordApi,
-  type DiscordSessionApi,
   type DiscordMessage,
+  type DiscordSessionApi,
+  type DiscordThread,
 } from "./discord/delivery.js";
 export {
-  createDiscordRequestListener,
   DiscordHttpIngress,
   DiscordHttpSecurityLogger,
   type DiscordHttpHardeningOptions,
-  type DiscordRequestListenerOptions,
-  type DiscordSignatureVerifier,
 } from "./discord/http-ingress.js";
 export { DiscordDurableInteractionHandler } from "./discord/inbox.js";
 export { DiscordGatewayIngress } from "./discord/gateway-ingress.js";
 export {
-  DISCORD_IMAGE_MIME_TYPES,
-  normalizeDiscordCommand,
   parseDiscordCommand,
   parseDiscordThreadMessage,
   type DiscordAttachmentReference,
-  type DiscordCommandIgnoreReason,
   type DiscordCommandParseResult,
-  type DiscordMessageIgnoreReason,
   type DiscordMessageParseResult,
   type ParsedDiscordCommand,
 } from "./discord/normalization.js";

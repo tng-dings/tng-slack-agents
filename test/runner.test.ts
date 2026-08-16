@@ -12,7 +12,7 @@ import { AgentRunner } from "../src/runner.js";
 import { SlackJobReporter } from "../src/slack.js";
 import { readRunnerStatus } from "../src/status.js";
 import type { Attachment, Executor, JobRecord, JobReporter } from "../src/types.js";
-import { testAuthorizationPolicy, testConfig, testExecutor, waitFor } from "./helpers.js";
+import { persistSessionExecution, testAuthorizationPolicy, testConfig, testExecutor, waitFor } from "./helpers.js";
 
 test("runner status is read-only, bounded, and hides session identities", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-status-"));
@@ -277,7 +277,7 @@ test("startup reconciliation blocks a session until abort confirms it stopped", 
     actorId: "U_ALLOWED",
     prompt: "interrupted",
   });
-  database.updateSessionExecution(running.sessionKey, "opencode", "old-provider-session", path.join(root, "worktree"));
+  persistSessionExecution(database, running.sessionKey, "opencode", "old-provider-session", path.join(root, "worktree"));
   assert.equal(database.claimNextJob(1, 1)?.id, running.id);
   const queued = database.insertJob("queued-after-interruption", {
     integration: "slack",
@@ -351,7 +351,7 @@ test("durable reconciliation state survives a second restart", async () => {
     actorId: "U_ALLOWED",
     prompt: "interrupted",
   });
-  database.updateSessionExecution(running.sessionKey, "opencode", "durable-provider-session", path.join(root, "worktree"));
+  persistSessionExecution(database, running.sessionKey, "opencode", "durable-provider-session", path.join(root, "worktree"));
   assert.equal(database.claimNextJob(1, 1)?.id, running.id);
   assert.equal(database.recoverInterruptedJobs().length, 1);
   assert.equal(database.getSession(running.sessionKey)?.reconciliationRequired, true);
@@ -397,7 +397,7 @@ test("failed startup reconciliation fails visibly and preserves queued work for 
     actorId: "U_ALLOWED",
     prompt: "ambiguous",
   });
-  database.updateSessionExecution(running.sessionKey, "opencode", "ambiguous-provider-session", path.join(root, "worktree"));
+  persistSessionExecution(database, running.sessionKey, "opencode", "ambiguous-provider-session", path.join(root, "worktree"));
   assert.equal(database.claimNextJob(1, 1)?.id, running.id);
   const queued = database.insertJob("queued-after-quarantine", {
     integration: "slack",

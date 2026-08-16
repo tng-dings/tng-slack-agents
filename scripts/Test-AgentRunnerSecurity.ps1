@@ -96,8 +96,6 @@ $workerSecretPath = Join-Path $WorkerDataDirectory "worker-secrets.bin"
 Assert-Control (Test-Path $gatewaySecretPath) "gateway secret bundle exists"
 
 if (Test-Path $gatewaySecretPath) {
-    $names = Read-SecretNames $gatewaySecretPath
-    $aclNames = @((Get-Acl $gatewaySecretPath).Access.IdentityReference.Value)
     Assert-Control (Test-RestrictedAcl $gatewaySecretPath @("NT AUTHORITY\SYSTEM", "BUILTIN\Administrators", "NT SERVICE\AgentRunner")) "gateway secret bundle is not broadly readable"
 }
 

@@ -11,19 +11,14 @@ import { SlackSocketIngress } from "./slack/socket-ingress.js";
 export { SlackAdapter, type SlackAdapterOptions } from "./slack/adapter.js";
 export { SlackJobReporter } from "./slack/delivery.js";
 export {
-  normalizeSlackAppHome,
   normalizeSlackMessage,
   parseSlackMessage,
-  SLACK_ATTACHMENT_PROMPT,
-  type NormalizedSlackAppHome,
   type ParsedSlackMessage,
-  type SlackMessageIgnoreReason,
   type SlackMessageParseResult,
 } from "./slack/normalization.js";
 export { SlackSocketIngress, type SlackEventHandler } from "./slack/socket-ingress.js";
 export {
   defaultSlackHttpHardening,
-  hardenSlackRequestListener,
   SlackHttpIngress,
   SlackHttpSecurityLogger,
   type SlackHttpHardeningOptions,
