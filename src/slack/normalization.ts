@@ -1,4 +1,5 @@
 import type { Attachment, JobSubmission } from "../types.js";
+import { asRecord } from "../values.js";
 
 export const SLACK_ATTACHMENT_PROMPT = "Please review the attached screenshot(s).";
 
@@ -29,18 +30,14 @@ export interface NormalizedSlackAppHome {
   readonly actorId: string;
 }
 
-function record(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
-}
-
 /**
  * Applies the Slack message acceptance and identity rules without performing
  * network I/O. Both Socket Mode and Events API ingress hand their event/body
  * pair through this function before the adapter does any work.
  */
 export function parseSlackMessage(eventValue: unknown, bodyValue: unknown): SlackMessageParseResult {
-  const event = record(eventValue);
-  const body = record(bodyValue);
+  const event = asRecord(eventValue);
+  const body = asRecord(bodyValue);
   if (event.channel_type !== "im") return { accepted: false, reason: "not_direct_message" };
   if (typeof event.user !== "string") return { accepted: false, reason: "missing_actor" };
   if (event.bot_id) return { accepted: false, reason: "bot_message" };
@@ -93,9 +90,9 @@ export function normalizeSlackMessage(
 
 /** Normalizes the app-home context shared by every Slack ingress mode. */
 export function normalizeSlackAppHome(eventValue: unknown, bodyValue: unknown): NormalizedSlackAppHome | undefined {
-  const event = record(eventValue);
+  const event = asRecord(eventValue);
   if (event.tab !== "messages" || !event.channel || !event.user) return undefined;
-  const body = record(bodyValue);
+  const body = asRecord(bodyValue);
   return {
     tenantId: String(body.team_id ?? ""),
     conversationId: String(event.channel),

@@ -1,15 +1,10 @@
 import { GatewayDispatchEvents, GatewayIntentBits, type GatewayDispatchPayload } from "discord-api-types/v10";
 import { WebSocketManager, WebSocketShardEvents } from "@discordjs/ws";
 import { REST } from "@discordjs/rest";
+import { asRecord } from "../values.js";
 import type { DiscordAdapter } from "./adapter.js";
 import type { DiscordSessionApi } from "./delivery.js";
 import type { DiscordDurableInteractionHandler } from "./inbox.js";
-
-function record(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
-}
 
 /** Outbound-only Discord transport for slash commands and agent-thread messages. */
 export class DiscordGatewayIngress {
@@ -87,7 +82,7 @@ export class DiscordGatewayIngress {
   }
 
   private async handleInteraction(value: unknown): Promise<void> {
-    const interaction = record(value);
+    const interaction = asRecord(value);
     const id = typeof interaction.id === "string" ? interaction.id : "";
     const token = typeof interaction.token === "string" ? interaction.token : "";
     if (!id || !token) return;
@@ -104,7 +99,7 @@ export class DiscordGatewayIngress {
     const prepared = this.adapter.prepareThreadMessage(value);
     if (prepared.kind === "ignored") return;
     if (prepared.kind === "rejected") {
-      const message = record(value);
+      const message = asRecord(value);
       const channelId = typeof message.channel_id === "string" ? message.channel_id : "";
       const sourceId = typeof message.id === "string" ? message.id : "rejected-message";
       if (channelId) await this.api.createMessage(channelId, prepared.message, sourceId.slice(0, 25));

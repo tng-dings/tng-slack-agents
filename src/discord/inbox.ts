@@ -1,6 +1,7 @@
 import type { RunnerDatabase } from "../database.js";
 import { DurableInboxPump } from "../inbox.js";
 import type { InboundEventRecord } from "../types.js";
+import { asRecord } from "../values.js";
 import type { DiscordAdapter } from "./adapter.js";
 import type { DiscordAttachmentReference, ParsedDiscordCommand } from "./normalization.js";
 
@@ -8,15 +9,9 @@ interface DiscordInboxPayload {
   command: ParsedDiscordCommand;
 }
 
-function record(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
-}
-
 function persistedCommand(event: InboundEventRecord): ParsedDiscordCommand {
-  const payload = record(event.payload);
-  const command = record(payload.command);
+  const payload = asRecord(event.payload);
+  const command = asRecord(payload.command);
   for (const field of [
     "sourceEventId",
     "applicationId",
@@ -32,7 +27,7 @@ function persistedCommand(event: InboundEventRecord): ParsedDiscordCommand {
   }
   let attachment: DiscordAttachmentReference | undefined;
   if (command.attachment !== undefined) {
-    const value = record(command.attachment);
+    const value = asRecord(command.attachment);
     if (
       typeof value.id !== "string" ||
       typeof value.filename !== "string" ||

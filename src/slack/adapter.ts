@@ -4,6 +4,7 @@ import { redactableSecretValues, type RunnerConfig, type RunnerSecrets } from ".
 import { RunnerError } from "../errors.js";
 import type { AgentRunner } from "../runner.js";
 import type { Attachment, JobRecord, JobReporter } from "../types.js";
+import { asRecord } from "../values.js";
 import { SlackJobReporter } from "./delivery.js";
 import {
   normalizeSlackAppHome,
@@ -63,7 +64,7 @@ export class SlackAdapter {
   }
 
   prepareMessage(message: unknown, body: unknown): SlackMessagePreparation {
-    const bodyRecord = typeof body === "object" && body !== null ? body as Record<string, unknown> : {};
+    const bodyRecord = asRecord(body);
     if (
       this.config.slack.ingress === "events-api" &&
       this.config.slack.appId &&
@@ -104,7 +105,7 @@ export class SlackAdapter {
   }
 
   async handleAppHome(event: unknown, body: unknown, client: WebClient = this.client): Promise<void> {
-    const bodyRecord = typeof body === "object" && body !== null ? body as Record<string, unknown> : {};
+    const bodyRecord = asRecord(body);
     if (
       this.config.slack.ingress === "events-api" &&
       this.config.slack.appId &&

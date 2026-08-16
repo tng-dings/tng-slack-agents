@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { redactString } from "../audit.js";
 import type { JobRecord, JobReporter } from "../types.js";
+import { asRecord } from "../values.js";
 
 const DISCORD_API_BASE_URL = "https://discord.com/api/v10";
 const DISCORD_USER_AGENT = "DiscordBot (https://github.com/tng-dings/tng-slack-agents, 0.1.0)";
@@ -71,10 +72,11 @@ export class DiscordApiClient implements DiscordSessionApi {
       allowed_mentions: { parse: [] },
       flags: SUPPRESS_EMBEDS,
     });
-    if (!result || typeof result !== "object" || typeof (result as Record<string, unknown>).id !== "string") {
+    const response = asRecord(result);
+    if (typeof response.id !== "string") {
       throw new Error("Discord create-message response did not contain a message ID");
     }
-    return { id: (result as Record<string, unknown>).id as string };
+    return { id: response.id };
   }
 
   async editMessage(channelId: string, messageId: string, content: string): Promise<void> {
@@ -91,16 +93,17 @@ export class DiscordApiClient implements DiscordSessionApi {
       `/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}/threads`,
       { name, auto_archive_duration: 1_440 },
     );
-    if (!result || typeof result !== "object" || typeof (result as Record<string, unknown>).id !== "string") {
+    const response = asRecord(result);
+    if (typeof response.id !== "string") {
       throw new Error("Discord create-thread response did not contain a thread ID");
     }
-    return { id: (result as Record<string, unknown>).id as string };
+    return { id: response.id };
   }
 
   async getThread(threadId: string): Promise<DiscordThread | undefined> {
     try {
       const result = await this.request("GET", `/channels/${encodeURIComponent(threadId)}`);
-      if (!result || typeof result !== "object" || (result as Record<string, unknown>).id !== threadId) return undefined;
+      if (asRecord(result).id !== threadId) return undefined;
       return { id: threadId };
     } catch (error) {
       if (error instanceof DiscordApiRequestError && error.status === 404) return undefined;

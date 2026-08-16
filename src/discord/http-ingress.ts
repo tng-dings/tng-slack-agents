@@ -14,6 +14,7 @@ import {
   sendJsonResponse,
   type HttpSecurityLogSink,
 } from "../http.js";
+import { asRecord } from "../values.js";
 import type { DiscordAdapter } from "./adapter.js";
 import type { DiscordDurableInteractionHandler } from "./inbox.js";
 
@@ -133,7 +134,7 @@ export function createDiscordRequestListener(options: DiscordRequestListenerOpti
           sendEmptyResponse(response, 400, { connection: "close" });
           return;
         }
-        const value = interaction as Record<string, unknown>;
+        const value = asRecord(interaction);
         if (value.type === InteractionType.PING) {
           sendJsonResponse(response, 200, { type: InteractionResponseType.PONG });
           return;

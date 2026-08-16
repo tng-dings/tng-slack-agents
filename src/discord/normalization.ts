@@ -1,6 +1,7 @@
 import { MessageType } from "discord-api-types/v10";
 import { isSupportedImageMime } from "../attachments.js";
 import type { Attachment, DiscordThreadRecord, JobSubmission } from "../types.js";
+import { asRecord } from "../values.js";
 
 const DISCORD_APPLICATION_COMMAND = 2;
 const DISCORD_STRING_OPTION = 3;
@@ -53,16 +54,10 @@ export type DiscordMessageParseResult =
   | { readonly accepted: true; readonly command: ParsedDiscordCommand }
   | { readonly accepted: false; readonly reason: DiscordMessageIgnoreReason };
 
-function record(value: unknown): Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : {};
-}
-
 function option(options: unknown, name: string, type: number): Record<string, unknown> | undefined {
   if (!Array.isArray(options)) return undefined;
   return options
-    .map(record)
+    .map(asRecord)
     .find((candidate) => candidate.name === name && candidate.type === type);
 }
 
@@ -70,9 +65,9 @@ function attachmentReference(data: Record<string, unknown>): DiscordAttachmentRe
   const selected = option(data.options, "attachment", DISCORD_ATTACHMENT_OPTION);
   if (!selected) return undefined;
   if (typeof selected.value !== "string") return undefined;
-  const resolved = record(data.resolved);
-  const attachments = record(resolved.attachments);
-  const attachment = record(attachments[selected.value]);
+  const resolved = asRecord(data.resolved);
+  const attachments = asRecord(resolved.attachments);
+  const attachment = asRecord(attachments[selected.value]);
   if (
     typeof attachment.id !== "string" ||
     attachment.id !== selected.value ||
@@ -106,22 +101,22 @@ export function parseDiscordCommand(
   expectedApplicationId: string,
   expectedCommandName: string,
 ): DiscordCommandParseResult {
-  const interaction = record(value);
+  const interaction = asRecord(value);
   if (interaction.type !== DISCORD_APPLICATION_COMMAND) {
     return { accepted: false, reason: "not_application_command" };
   }
   if (interaction.application_id !== expectedApplicationId) {
     return { accepted: false, reason: "wrong_application" };
   }
-  const data = record(interaction.data);
+  const data = asRecord(interaction.data);
   if (data.name !== expectedCommandName || data.type !== 1) {
     return { accepted: false, reason: "wrong_command" };
   }
   if (typeof interaction.guild_id !== "string" || !interaction.guild_id) {
     return { accepted: false, reason: "not_guild_command" };
   }
-  const member = record(interaction.member);
-  const user = record(member.user);
+  const member = asRecord(interaction.member);
+  const user = asRecord(member.user);
   if (
     typeof interaction.id !== "string" ||
     typeof interaction.channel_id !== "string" ||
@@ -137,7 +132,7 @@ export function parseDiscordCommand(
   if (selectedAttachment && !attachment) {
     return { accepted: false, reason: "invalid_attachment" };
   }
-  const channel = record(interaction.channel);
+  const channel = asRecord(interaction.channel);
   if (typeof channel.type !== "number" || !DISCORD_TOP_LEVEL_CHANNEL_TYPES.has(channel.type)) {
     return { accepted: false, reason: "not_top_level_channel" };
   }
@@ -178,8 +173,8 @@ export function parseDiscordThreadMessage(
   thread: DiscordThreadRecord,
   applicationId: string,
 ): DiscordMessageParseResult {
-  const message = record(value);
-  const author = record(message.author);
+  const message = asRecord(value);
+  const author = asRecord(message.author);
   if (message.channel_id !== thread.threadId) return { accepted: false, reason: "not_thread_message" };
   if (message.guild_id !== thread.guildId) return { accepted: false, reason: "wrong_guild" };
   if (author.bot === true || typeof message.webhook_id === "string") {
@@ -197,7 +192,7 @@ export function parseDiscordThreadMessage(
   if (rawAttachments.length > 1) return { accepted: false, reason: "invalid_attachment" };
   let attachment: DiscordAttachmentReference | undefined;
   if (rawAttachments.length === 1) {
-    const value = record(rawAttachments[0]);
+    const value = asRecord(rawAttachments[0]);
     if (
       typeof value.id !== "string" ||
       typeof value.filename !== "string" ||

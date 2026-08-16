@@ -3,6 +3,7 @@ import type { RunnerDatabase } from "../database.js";
 import { RunnerError } from "../errors.js";
 import type { AgentRunner } from "../runner.js";
 import type { Attachment, JobRecord, JobReporter } from "../types.js";
+import { asRecord } from "../values.js";
 import type { DiscordSessionApi } from "./delivery.js";
 import { DiscordJobReporter } from "./delivery.js";
 import {
@@ -105,7 +106,7 @@ export class DiscordAdapter {
   }
 
   prepareThreadMessage(value: unknown): DiscordInteractionPreparation | { readonly kind: "ignored" } {
-    const message = typeof value === "object" && value !== null ? value as Record<string, unknown> : {};
+    const message = asRecord(value);
     const channelId = typeof message.channel_id === "string" ? message.channel_id : "";
     const thread = channelId ? this.database.getDiscordThread(channelId) : undefined;
     if (!thread) return { kind: "ignored" };
