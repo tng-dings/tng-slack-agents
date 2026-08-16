@@ -58,7 +58,9 @@ test("configuration loads a Discord-only deployment that omits the Slack allowli
   assert.deepEqual(loaded.slack.allowedUserIds, []);
   assert.deepEqual(loaded.integrations.discord?.allowedTenants, ["123456789012345678"]);
   // A `-SlackIngress disabled -EnableDiscord` bundle carries no Slack credential.
-  const previous = { ...process.env };
+  // The suite shares one process, so restore exactly the names touched here.
+  const names = ["OPENCODE_SERVER_PASSWORD", "DISCORD_BOT_TOKEN", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN"] as const;
+  const previous = new Map(names.map((name) => [name, process.env[name]]));
   process.env.OPENCODE_SERVER_PASSWORD = "opencode-password";
   process.env.DISCORD_BOT_TOKEN = "discord-token";
   delete process.env.SLACK_BOT_TOKEN;
@@ -68,7 +70,10 @@ test("configuration loads a Discord-only deployment that omits the Slack allowli
     assert.equal(secrets.slackBotToken, undefined);
     assert.equal(secrets.discordBotToken, "discord-token");
   } finally {
-    process.env = previous;
+    for (const [name, value] of previous) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
   }
   await rm(root, { recursive: true, force: true });
 });
