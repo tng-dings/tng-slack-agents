@@ -850,20 +850,9 @@ test("database migrates legacy daily_usage rows to integration-aware budget trac
   await rm(root, { recursive: true, force: true });
 });
 
-test("Slack reporter uses native streaming with the correct destination", async () => {
+test("Slack reporter edits its own working message when live updates are enabled", async () => {
   const calls: Array<{ kind: string; value: unknown }> = [];
   const fakeClient = {
-    chatStream: (input: unknown) => {
-      calls.push({ kind: "stream", value: input });
-      return {
-        append: async (value: unknown) => {
-          calls.push({ kind: "append", value });
-        },
-        stop: async () => {
-          calls.push({ kind: "stop", value: null });
-        },
-      };
-    },
     chat: {
       update: async (value: unknown) => {
         calls.push({ kind: "update", value });
@@ -907,13 +896,13 @@ test("Slack reporter uses native streaming with the correct destination", async 
   await reporter.append("hello");
   await reporter.succeed("hello");
 
-  const streamCall = calls.find((call) => call.kind === "stream")?.value as Record<string, unknown>;
-  assert.equal(streamCall.channel, "D1");
-  assert.equal(streamCall.thread_ts, "1.0");
-  assert.equal(streamCall.recipient_team_id, "T1");
-  assert.equal(streamCall.recipient_user_id, "U1");
-  assert(calls.some((call) => call.kind === "append"));
-  assert(calls.some((call) => call.kind === "stop"));
+  // The persisted delivery message is edited in place; no second message and no
+  // Slack-native stream is opened for the thread.
+  assert(!calls.some((call) => call.kind === "post"));
+  const update = calls.find((call) => call.kind === "update")?.value as Record<string, unknown>;
+  assert.equal(update.channel, "D1");
+  assert.equal(update.ts, "1.1");
+  assert.equal(update.text, "hello");
 });
 
 test("runner rejects submissions for an integration with no authorization policy", async () => {

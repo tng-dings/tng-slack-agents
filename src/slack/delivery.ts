@@ -2,11 +2,6 @@ import type { WebClient } from "@slack/web-api";
 import { redactString } from "../audit.js";
 import type { JobRecord, JobReporter } from "../types.js";
 
-interface SlackStream {
-  append(input: { markdown_text: string }): Promise<unknown>;
-  stop(input?: { markdown_text?: string }): Promise<unknown>;
-}
-
 function messageText(output: string, secrets: string[]): string {
   const limit = 39_000;
   const redacted = redactString(output, secrets);
@@ -17,16 +12,13 @@ function messageText(output: string, secrets: string[]): string {
 export class SlackJobReporter implements JobReporter {
   private output = "";
   private pending = "";
-  private stream: SlackStream | undefined;
   private flushTimer: NodeJS.Timeout | undefined;
-  private nativeFailed = false;
   private chain = Promise.resolve();
   private replyTs: string | null;
 
   constructor(
     private readonly client: WebClient,
     private readonly job: JobRecord,
-    private readonly nativeStreaming: boolean,
     private readonly liveUpdates = true,
     private readonly secrets: string[] = [],
   ) {
@@ -65,12 +57,7 @@ export class SlackJobReporter implements JobReporter {
     this.flushTimer = undefined;
     await this.chain;
     await this.flush();
-    if (this.stream) {
-      await this.stream.stop();
-      await this.updateWorkingMessage("Completed.");
-    } else {
-      await this.updateWorkingMessage(messageText(this.output || "Completed with no text response.", this.secrets));
-    }
+    await this.updateWorkingMessage(messageText(this.output || "Completed with no text response.", this.secrets));
     await this.setStatus("");
   }
 
@@ -78,7 +65,6 @@ export class SlackJobReporter implements JobReporter {
     if (this.flushTimer) clearTimeout(this.flushTimer);
     this.flushTimer = undefined;
     await this.chain;
-    if (this.stream) await this.stream.stop().catch(() => undefined);
     await this.updateWorkingMessage(messageText(`Agent job failed: ${message}`, this.secrets));
     await this.setStatus("");
   }
@@ -87,21 +73,6 @@ export class SlackJobReporter implements JobReporter {
     const delta = this.pending;
     this.pending = "";
     if (!delta || !this.liveUpdates) return;
-    if (this.nativeStreaming && !this.nativeFailed) {
-      try {
-        this.stream ??= this.client.chatStream({
-          channel: this.job.conversationId,
-          thread_ts: this.job.threadId,
-          recipient_team_id: this.job.tenantId,
-          recipient_user_id: this.job.actorId,
-        });
-        await this.stream.append({ markdown_text: delta });
-        return;
-      } catch {
-        this.nativeFailed = true;
-        this.stream = undefined;
-      }
-    }
     await this.updateWorkingMessage(messageText(this.output, this.secrets));
   }
 

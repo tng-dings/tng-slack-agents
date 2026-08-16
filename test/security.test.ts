@@ -38,6 +38,41 @@ test("configuration rejects unsafe native Slack streaming", async () => {
   await rm(root, { recursive: true, force: true });
 });
 
+test("configuration loads a Discord-only deployment that omits the Slack allowlists", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-discord-only-config-"));
+  const filename = path.join(root, "config.json");
+  const config = {
+    slack: { enabled: false },
+    discord: {
+      enabled: true,
+      applicationId: "123456789012345678",
+      allowedGuildIds: ["123456789012345678"],
+      allowedUserIds: ["123456789012345678"],
+    },
+    openCode: { baseUrl: "http://127.0.0.1:4096", workingRepository: root, approvedVersions: ["1.2.3"] },
+    storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
+  };
+  await writeFile(filename, JSON.stringify(config));
+  const loaded = await loadConfig(filename);
+  assert.equal(loaded.slack.enabled, false);
+  assert.deepEqual(loaded.slack.allowedUserIds, []);
+  assert.deepEqual(loaded.integrations.discord?.allowedTenants, ["123456789012345678"]);
+  // A `-SlackIngress disabled -EnableDiscord` bundle carries no Slack credential.
+  const previous = { ...process.env };
+  process.env.OPENCODE_SERVER_PASSWORD = "opencode-password";
+  process.env.DISCORD_BOT_TOKEN = "discord-token";
+  delete process.env.SLACK_BOT_TOKEN;
+  delete process.env.SLACK_APP_TOKEN;
+  try {
+    const secrets = loadSecrets(loaded);
+    assert.equal(secrets.slackBotToken, undefined);
+    assert.equal(secrets.discordBotToken, "discord-token");
+  } finally {
+    process.env = previous;
+  }
+  await rm(root, { recursive: true, force: true });
+});
+
 test("configuration accepts only an explicit OpenCode version allowlist", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-opencode-version-config-"));
   const filename = path.join(root, "config.json");

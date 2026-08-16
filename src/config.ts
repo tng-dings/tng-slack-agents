@@ -62,7 +62,6 @@ interface RunnerConfigBase {
     allowedWorkspaceIds: string[];
     allowedUserIds: string[];
     liveUpdates: boolean;
-    nativeStreaming: boolean;
     http: {
       host: string;
       port: number;
@@ -126,9 +125,24 @@ export interface RunnerSecrets {
   providerCredentials?: string[];
 }
 
+/**
+ * Every secret value that must be scrubbed from audit records and from output
+ * delivered to any integration. One list keeps a credential from being redacted
+ * on one platform while leaking through another.
+ */
+export function redactableSecretValues(secrets: RunnerSecrets): string[] {
+  return [
+    secrets.openCodePassword,
+    secrets.discordBotToken,
+    secrets.slackBotToken,
+    secrets.slackAppToken,
+    secrets.slackSigningSecret,
+    ...(secrets.providerCredentials ?? []),
+  ].filter((value): value is string => Boolean(value));
+}
+
 const defaults = {
   liveUpdates: false,
-  nativeStreaming: false,
   maxConcurrentJobsPerUser: 1,
   maxConcurrentJobsGlobal: 1,
   maxQueuedJobsPerUser: 3,
@@ -304,7 +318,7 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
   const ingress = slackIngress(slack.ingress);
   const appId = typeof slack.appId === "string" && slack.appId.trim() ? slack.appId.trim() : undefined;
   const allowedWorkspaceIds = stringArray(slack.allowedWorkspaceIds ?? [], "slack.allowedWorkspaceIds");
-  const allowedUserIds = stringArray(slack.allowedUserIds, "slack.allowedUserIds");
+  const allowedUserIds = stringArray(slack.allowedUserIds ?? [], "slack.allowedUserIds");
   if (enabled && allowedWorkspaceIds.length === 0) throw new Error("slack.allowedWorkspaceIds must not be empty when Slack is enabled");
   if (enabled && allowedUserIds.length === 0) throw new Error("slack.allowedUserIds must not be empty when Slack is enabled");
   if (enabled && ingress === "events-api" && !appId) {
@@ -453,7 +467,6 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
       allowedWorkspaceIds,
       allowedUserIds,
       liveUpdates: slack.liveUpdates === true,
-      nativeStreaming: false,
       http: {
         host: privateHttpHost(slackHttp.host, defaults.slackHttpHost, "slack.http.host"),
         port: slackPort,

@@ -1,6 +1,5 @@
-import { IntegrationAuthorizationPolicy, type RunnerConfig } from "../src/config.js";
+import { IntegrationAuthorizationPolicy, type OpenCodeRunnerConfig, type RunnerConfig } from "../src/config.js";
 import type { Executor } from "../src/types.js";
-import type { OpenCodeRunnerConfig } from "../src/config.js";
 
 export function testConfig(root: string): OpenCodeRunnerConfig {
   return {
@@ -36,7 +35,6 @@ export function testConfig(root: string): OpenCodeRunnerConfig {
       allowedWorkspaceIds: ["T1"],
       allowedUserIds: ["U_ALLOWED"],
       liveUpdates: false,
-      nativeStreaming: false,
       http: {
         host: "127.0.0.1",
         port: 3000,

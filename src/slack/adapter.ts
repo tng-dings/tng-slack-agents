@@ -1,5 +1,5 @@
 import type { WebClient } from "@slack/web-api";
-import type { RunnerConfig, RunnerSecrets } from "../config.js";
+import { redactableSecretValues, type RunnerConfig, type RunnerSecrets } from "../config.js";
 import { RunnerError } from "../errors.js";
 import type { AgentRunner } from "../runner.js";
 import type { Attachment, JobRecord, JobReporter } from "../types.js";
@@ -42,13 +42,7 @@ export class SlackAdapter {
   ) {
     this.allowedWorkspaces = new Set(config.slack.allowedWorkspaceIds);
     this.allowedUsers = new Set(config.slack.allowedUserIds);
-    this.outputSecrets = [
-      secrets.openCodePassword,
-      secrets.slackBotToken,
-      secrets.slackAppToken ?? "",
-      secrets.slackSigningSecret ?? "",
-      ...(secrets.providerCredentials ?? []),
-    ];
+    this.outputSecrets = redactableSecretValues(secrets);
     this.fetcher = options.fetch ?? globalThis.fetch;
     this.now = options.now ?? Date.now;
   }
@@ -58,13 +52,7 @@ export class SlackAdapter {
   }
 
   reporter(job: JobRecord): JobReporter {
-    return new SlackJobReporter(
-      this.client,
-      job,
-      this.config.slack.nativeStreaming,
-      this.config.slack.liveUpdates,
-      this.outputSecrets,
-    );
+    return new SlackJobReporter(this.client, job, this.config.slack.liveUpdates, this.outputSecrets);
   }
 
   async handleMessage(message: unknown, body: unknown, client: WebClient = this.client): Promise<void> {

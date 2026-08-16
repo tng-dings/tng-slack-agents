@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { AuditLogger } from "../audit.js";
 import { ClaudeCodeExecutor } from "../claude-code.js";
-import { loadConfig, loadSecrets } from "../config.js";
+import { loadConfig, loadSecrets, redactableSecretValues } from "../config.js";
 import { RunnerDatabase } from "../database.js";
 import { OpenCodeExecutor } from "../opencode.js";
 import { WorkspaceManager } from "../workspace.js";
@@ -20,7 +20,7 @@ async function main(): Promise<void> {
   const audit = new AuditLogger(
     config.storage.auditLogPath,
     database,
-    [secrets.openCodePassword, ...(secrets.providerCredentials ?? [])],
+    redactableSecretValues(secrets),
     config.limits.maxAuditEventCharacters,
   );
   const workspaces = new WorkspaceManager(config.workingRepository, config.storage.worktreeRoot);
@@ -51,7 +51,7 @@ async function main(): Promise<void> {
   try {
     if (executor instanceof OpenCodeExecutor) {
       const health = await executor.health();
-      console.log(`Connected to OpenCode ${health.version ?? "unknown"}.`);
+      console.log(`Connected to OpenCode ${health.version}.`);
     } else {
       console.log("Using the local Claude Code executor.");
     }
