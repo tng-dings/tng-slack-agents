@@ -1,4 +1,5 @@
 import { IntegrationAuthorizationPolicy, type OpenCodeRunnerConfig, type RunnerConfig } from "../src/config.js";
+import type { RunnerDatabase } from "../src/database.js";
 import type { Executor } from "../src/types.js";
 
 export function testConfig(root: string): OpenCodeRunnerConfig {
@@ -77,6 +78,21 @@ export function testConfig(root: string): OpenCodeRunnerConfig {
     },
     queue: { pollIntervalMs: 5 },
   };
+}
+
+/**
+ * Puts a session into the state the runner leaves behind once a provider turn
+ * has started, using the same persist-workspace-then-provider-session order.
+ */
+export function persistSessionExecution(
+  database: RunnerDatabase,
+  sessionKey: string,
+  providerId: string,
+  providerSessionId: string,
+  workingDirectory: string,
+): void {
+  database.updateSessionWorkingDirectory(sessionKey, workingDirectory);
+  database.updateSessionProviderSession(sessionKey, providerId, providerSessionId);
 }
 
 export async function waitFor(check: () => boolean, timeoutMs = 2_000): Promise<void> {

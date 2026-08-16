@@ -175,7 +175,6 @@ export class RunnerDatabase {
       );
 
       CREATE INDEX IF NOT EXISTS jobs_status_created_idx ON jobs(status, created_at);
-      CREATE INDEX IF NOT EXISTS jobs_user_status_idx ON jobs(user_id, status);
       CREATE INDEX IF NOT EXISTS jobs_session_status_idx ON jobs(session_key, status);
 
       CREATE TABLE IF NOT EXISTS daily_usage (
@@ -271,6 +270,9 @@ export class RunnerDatabase {
       this.sqlite.exec("ALTER TABLE jobs ADD COLUMN delivery_message_id TEXT; UPDATE jobs SET delivery_message_id = reply_ts WHERE reply_ts IS NOT NULL;");
     }
     this.sqlite.exec("CREATE INDEX IF NOT EXISTS jobs_actor_status_idx ON jobs(actor_id, status)");
+    // The legacy user_id column is still written for rollback compatibility but
+    // is never queried; jobs_actor_status_idx supersedes its index.
+    this.sqlite.exec("DROP INDEX IF EXISTS jobs_user_status_idx");
 
     const sessionColumns = this.sqlite.prepare("PRAGMA table_info(sessions)").all() as Row[];
     if (!sessionColumns.some((col) => String(col.name) === "execution_generation")) {
@@ -359,14 +361,6 @@ export class RunnerDatabase {
   getSession(sessionKey: string): SessionRecord | undefined {
     const row = this.sqlite.prepare("SELECT * FROM sessions WHERE session_key = ?").get(sessionKey) as Row | undefined;
     return row ? mapSession(row) : undefined;
-  }
-
-  updateSessionExecution(sessionKey: string, providerId: string, providerSessionId: string, workingDirectory: string): void {
-    this.sqlite.prepare(`
-      UPDATE sessions SET provider_id = ?, provider_session_id = ?,
-        opencode_session_id = CASE WHEN ? = 'opencode' THEN ? ELSE opencode_session_id END,
-        working_directory = ?, updated_at = ? WHERE session_key = ?
-    `).run(providerId, providerSessionId, providerId, providerSessionId, workingDirectory, now(), sessionKey);
   }
 
   updateJobDeliveryMessageId(id: string, deliveryMessageId: string): void {
