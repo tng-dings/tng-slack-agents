@@ -40,13 +40,15 @@ Select Claude Code without configuring or starting an OpenCode server:
   "executor": "claude-code",
   "claudeCode": {
     "workingRepository": "C:\\source\\your-repository",
-    "model": "claude-sonnet-4-5",
+    "model": "claude-opus-5",
     "permissionMode": "bypassPermissions"
   }
 }
 ```
 
-`model` and `executablePath` are optional. `permissionMode` defaults to `bypassPermissions`; all Claude Agent SDK modes are accepted. The executor uses streaming SDK input and output, persists Claude's UUID as `providerSessionId`, passes it as `resume` on the next message in the Slack/Discord thread, and reuses the existing branch-backed worktree. Provider authentication, routing, and model variables for Anthropic, Bedrock, Vertex, and Foundry are forwarded from a fixed allowlist; integration tokens are not. The executor verifies the effective permission mode reported by the Claude child and fails rather than silently accepting a downgrade.
+`config.example.json` ships this block already. Only the block matching the selected `executor` is read, so the unused one is ignored: switching between providers means changing `executor` and the working repository, not adding or deleting sections.
+
+`model` and `executablePath` are optional. `permissionMode` defaults to `bypassPermissions`; all Claude Agent SDK modes are accepted. The executor uses streaming SDK input and output, persists Claude's UUID as `providerSessionId`, passes it as `resume` on the next message in the Slack/Discord thread, and reuses the existing branch-backed worktree. Provider authentication, routing, and model variables for Anthropic, Bedrock, Vertex, and Foundry are forwarded from a fixed allowlist; integration tokens are not. Provider credential values remain available to Claude tool subprocesses, so output and audit redaction cover those values. The executor verifies the effective permission mode reported by the Claude child and fails rather than silently accepting a downgrade.
 
 ## Interactive Windows: OpenCode two-terminal setup
 
