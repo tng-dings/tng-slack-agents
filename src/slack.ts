@@ -19,6 +19,7 @@ export {
 export { SlackSocketIngress, type SlackEventHandler } from "./slack/socket-ingress.js";
 export {
   defaultSlackHttpHardening,
+  hardenSlackRequestListener,
   SlackHttpIngress,
   SlackHttpSecurityLogger,
   type SlackHttpHardeningOptions,

@@ -18,9 +18,12 @@ export {
   type DiscordThread,
 } from "./discord/delivery.js";
 export {
+  createDiscordRequestListener,
   DiscordHttpIngress,
   DiscordHttpSecurityLogger,
   type DiscordHttpHardeningOptions,
+  type DiscordRequestListenerOptions,
+  type DiscordSignatureVerifier,
 } from "./discord/http-ingress.js";
 export { DiscordDurableInteractionHandler } from "./discord/inbox.js";
 export { DiscordGatewayIngress } from "./discord/gateway-ingress.js";
