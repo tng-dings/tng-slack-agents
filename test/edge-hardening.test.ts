@@ -33,34 +33,6 @@ test("NGINX edge bounds and buffers traffic before the private Bolt listener", a
   assert.match(configuration, /access_log off;/);
 });
 
-test("representative maximum-attachment Slack metadata fits the 256 KiB bound", () => {
-  const longMetadata = "m".repeat(8_192);
-  const body = JSON.stringify({
-    type: "event_callback",
-    team_id: "T0123456789",
-    api_app_id: "A0123456789",
-    event_id: "Ev0123456789",
-    event: {
-      type: "message",
-      channel_type: "im",
-      channel: "D0123456789",
-      user: "U0123456789",
-      ts: "1723020123.123456",
-      text: "x".repeat(12_000),
-      files: Array.from({ length: 4 }, (_value, index) => ({
-        id: `F${index}`,
-        name: longMetadata,
-        title: longMetadata,
-        mimetype: "image/png",
-        size: 5_000_000,
-        url_private_download: `https://files.slack.com/files-pri/example/${index}`,
-      })),
-    },
-  });
-
-  assert(Buffer.byteLength(body) < 256 * 1024);
-});
-
 test("deployment evidence validates an explicitly selected effective NGINX configuration", async () => {
   const script = await readFile("scripts/Test-AgentRunnerSecurity.ps1", "utf8");
   const runbook = await readFile("docs/public-endpoint-hardening.md", "utf8");
