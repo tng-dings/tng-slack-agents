@@ -49,6 +49,11 @@
     "approvedVersions": ["REPLACE_WITH_VALIDATED_OPENCODE_VERSION"],
     "workingRepository": "C:\\source\\your-repository"
   },
+  "claudeCode": {
+    "workingRepository": "C:\\source\\your-repository",
+    "model": "claude-opus-5",
+    "permissionMode": "bypassPermissions"
+  },
   "limits": {
     "maxConcurrentJobsPerUser": 1,
     "maxConcurrentJobsGlobal": 1,
