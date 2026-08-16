@@ -59,7 +59,7 @@ Completed in the August 2026 runtime-hardening milestone:
 Next operator-assisted validation (do not enable Slack or Discord gateways until these are complete):
 
 - [ ] Configure a model provider for the Windows identity that will run OpenCode. Interactive development can use `opencode` followed by `/connect`; the service identity must ultimately receive its separately scoped provider credential through the worker secret bundle.
-- [ ] Create the ignored `config.json` from `config.example.json` and point `openCode.workingRepository` at a disposable Git repository. No `config.json` existed when this handoff was written.
+- [ ] Create the ignored `config.json` from `config.example.json` and point `openCode.workingRepository` at a disposable Git repository.
 - [ ] Validate the installed native-Windows candidate with the full matrix in the upgrade runbook. Current candidate: Scoop `main/opencode` version `1.18.15`, shim `C:\Users\Simon\scoop\shims\opencode.exe`, x64 archive SHA-256 `A80785874978CCBB93B7BFE4345F5AED41696F5AE76C109CD6DBBB934DBE795D`, installed executable SHA-256 `FD254474DEF7EE35F07416CF4674C361F07E7BCD9C7FFB284AF21BB011066EE3`.
 - [ ] Only after that matrix passes, add `"1.18.15"` to `openCode.approvedVersions`, start the authenticated loopback server, and run `npm run doctor` followed by `npm run smoke`.
 - [ ] Record the live results and check the remaining Phase 2 version-approval box in the runtime evaluation. A schema mismatch, unknown event, cancellation/reconciliation failure, or redaction leak blocks approval.
@@ -102,7 +102,8 @@ Owns generic queue limits, idempotency, session serialization, execution, audit,
 Jobs and sessions need, at minimum, equivalents of:
 
 ```ts
-type IntegrationId = "slack" | "discord";
+// `local` is the implemented third member, used by the smoke CLI and console delivery.
+type IntegrationId = "slack" | "discord" | "local";
 
 interface NormalizedSubmission {
   integration: IntegrationId;

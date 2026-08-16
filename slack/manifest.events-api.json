@@ -44,7 +44,7 @@
   },
   "settings": {
     "event_subscriptions": {
-      "request_url": "https://agent.example.com/slack/events",
+      "request_url": "https://slack-agent.example.com/slack/events",
       "bot_events": [
         "app_home_opened",
         "message.im"

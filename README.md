@@ -72,6 +72,8 @@ opencode serve --hostname 127.0.0.1 --port 4096
 
 Leave Terminal 1 running. Stop it with `Ctrl+C` after the gateway has stopped.
 
+This manual server does **not** receive the restrictive runtime policy that `scripts/Start-OpenCode.ps1` applies to the `OpenCodeServer` Windows service, so auto-update, plugins, web tools, subagents, skills, and external-directory access are not denied here. Use this path only with a disposable repository; the reviewed policy applies to the service deployment described under [Windows services](#windows-services).
+
 ### Terminal 2 — AgentRunner client
 
 Open a second PowerShell window. The helper below reads secrets without putting their values in PowerShell command history. Enter the same OpenCode password used in Terminal 1.
@@ -96,7 +98,7 @@ Get-NetTCPConnection -LocalPort 4096 -State Listen |
     Select-Object LocalAddress, LocalPort, OwningProcess
 ```
 
-The expected `LocalAddress` is exactly `127.0.0.1`. Stop OpenCode if the listener reports `0.0.0.0`, `::`, or a LAN address. For an OpenCode-only validation, run the hardcoded smoke prompt here. If you are preparing Slack or Discord, continue to the appropriate section below; its command sequence runs this smoke test once after `doctor`.
+The expected `LocalAddress` is exactly `127.0.0.1`. Stop OpenCode if the listener reports `0.0.0.0`, `::`, or a LAN address. For an executor-only validation, run the smoke prompt here. If you are preparing Slack or Discord, continue to the appropriate section below; its command sequence runs this smoke test once after `doctor`.
 
 ```powershell
 npm run smoke
@@ -104,7 +106,7 @@ npm run smoke
 
 An optional prompt can be supplied after `--`, for example `npm run smoke -- "Review the tests"`. Keep Terminal 2 open and retain the `Set-ProcessSecret` helper for the integration-specific credentials below. Process-scoped secrets disappear when this terminal closes.
 
-The smoke command performs the server health and exact-version approval check, creates/reuses its persistent session and worktree, consumes strictly validated SSE events, prints the response, and records usage and tool events.
+The smoke command runs one turn through the configured executor: it creates or reuses the persistent provider session and branch-backed worktree, prints the response, and records usage and tool events. With `executor: "opencode"` it additionally performs the server health and exact-version approval check and consumes strictly validated SSE events. With `executor: "claude-code"` it starts a real Claude turn using the AgentRunner identity's provider credential, so it consumes provider budget.
 
 For a privacy-preserving queue and recovery snapshot, run:
 
@@ -233,7 +235,7 @@ For OpenCode, omission of `-Executor` remains backward compatible. Install `Open
 
 Write the absolute `opencode.exe` location into `%ProgramData%\OpenCodeWorker\opencode-path.txt`. Grant both virtual identities read/execute access to this project; grant `NT SERVICE\OpenCodeServer` only the configured repository/worktree and `.git/worktrees` access needed by execution. Start OpenCode before AgentRunner.
 
-For either executor, `-SlackIngress events-api` stores `SLACK_SIGNING_SECRET` instead of `SLACK_APP_TOKEN`. Add `-EnableDiscord` for Discord. A Discord-only Gateway deployment may use `-SlackIngress disabled -EnableDiscord`; legacy Discord HTTP ingress also requires `-DiscordIngress http`.
+For either executor, `-SlackIngress events-api` stores `SLACK_SIGNING_SECRET` instead of `SLACK_APP_TOKEN`. Add `-EnableDiscord` for Discord. A Discord-only Gateway deployment may use `-SlackIngress disabled -EnableDiscord` and must also set `slack.enabled` to `false` in the configuration, since Slack is enabled unless switched off; legacy Discord HTTP ingress also requires `-DiscordIngress http`.
 
 ## Security boundary
 

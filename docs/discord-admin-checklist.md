@@ -21,6 +21,10 @@ Set `discord.enabled` to `true`, `discord.ingress` to `"gateway"`, and configure
 - `allowedGuildIds` and `allowedUserIds`: non-empty exact-ID allowlists;
 - `maxOutputCharacters`: the Discord-specific final-output bound.
 
+Slack is enabled unless it is explicitly switched off, so a Discord-only
+deployment must also set `slack.enabled` to `false`. Its allowlists may then be
+omitted, and no Slack credential is required.
+
 The command is accepted only in a normal guild text channel:
 
 ```text

@@ -1,7 +1,7 @@
 <service>
   <id>OpenCodeServer</id>
   <name>OpenCode Headless Server</name>
-  <description>Authenticated localhost-only OpenCode HTTP service for the Slack agent runner.</description>
+  <description>Authenticated localhost-only OpenCode HTTP service for the Slack and Discord agent runner.</description>
   <executable>%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe</executable>
   <arguments>-NoProfile -NonInteractive -ExecutionPolicy Bypass -File "%BASE%\..\scripts\Start-OpenCode.ps1"</arguments>
   <workingdirectory>%BASE%\..</workingdirectory>

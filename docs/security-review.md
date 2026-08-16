@@ -117,7 +117,7 @@ Evidence:
 
 - OpenCode accepts only an HTTP loopback literal; remote hosts, URL credentials, paths, queries, fragments, and redirects are rejected.
 - HTTP Basic authentication uses a high-entropy password shared only between the two service bundles.
-- Runtime-inline OpenCode configuration disables auto-update, external-directory access, web tools, subagents, skills, and interactive questions. Unknown tools require approval and the coordinator rejects permission requests.
+- The `OpenCodeServer` launcher supplies a runtime-inline OpenCode configuration that disables auto-update, plugins, external-directory access, web tools, subagents, skills, and interactive questions. Unknown tools require approval and the coordinator rejects permission requests. Approval covers the service topology; a manually started OpenCode server does not receive this configuration.
 - A deterministic `agent-runner/<session-hash>` branch and worktree are used per normalized Slack/Discord session, with per-session serialization.
 - Global/per-user concurrency, queue, timeout, output, and reported-cost limits are enforced.
 - Integration delivery failure cannot change a successful execution result or trigger an automatic replay.
