@@ -1,7 +1,7 @@
 import { GatewayDispatchEvents, GatewayIntentBits, type GatewayDispatchPayload } from "discord-api-types/v10";
 import { WebSocketManager, WebSocketShardEvents } from "@discordjs/ws";
 import { REST } from "@discordjs/rest";
-import { asRecord } from "../values.js";
+import { asRecord, errorType } from "../values.js";
 import type { DiscordAdapter } from "./adapter.js";
 import type { DiscordSessionApi } from "./delivery.js";
 import type { DiscordDurableInteractionHandler } from "./inbox.js";
@@ -24,7 +24,7 @@ export class DiscordGatewayIngress {
     });
     this.manager.on(WebSocketShardEvents.Dispatch, (payload) => {
       void this.dispatch(payload).catch((error: unknown) => {
-        console.error("Discord Gateway event processing failed", error instanceof Error ? error.name : typeof error);
+        console.error("Discord Gateway event processing failed", errorType(error));
       });
     });
     this.manager.on(WebSocketShardEvents.Error, (error) => {

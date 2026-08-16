@@ -26,6 +26,7 @@ import {
   type OpenCodePart,
 } from "./opencode-protocol.js";
 import { assertApprovedOpenCodeVersion } from "./opencode-version.js";
+import { errorType } from "./values.js";
 
 function isObject(value: unknown): value is JsonObject {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
@@ -46,8 +47,7 @@ function errorMessage(value: unknown): string {
 
 function errorMetadata(value: unknown): { errorType: string; errorCode?: string } {
   if (value instanceof OpenCodeError) return { errorType: value.name, errorCode: value.code };
-  if (value instanceof Error) return { errorType: value.name || "Error" };
-  return { errorType: typeof value };
+  return { errorType: errorType(value) };
 }
 
 export class OpenCodeExecutor implements Executor {

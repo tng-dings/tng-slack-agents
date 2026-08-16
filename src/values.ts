@@ -5,3 +5,7 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
 export function asRecord(value: unknown): Record<string, unknown> {
   return isRecord(value) ? value : {};
 }
+
+export function errorType(value: unknown): string {
+  return value instanceof Error ? value.name || "Error" : typeof value;
+}

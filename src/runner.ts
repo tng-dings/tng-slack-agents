@@ -16,6 +16,7 @@ import type {
   SubmissionResult,
   Usage,
 } from "./types.js";
+import { errorType } from "./values.js";
 
 const emptyUsage = (): Usage => ({ cost: 0, inputTokens: 0, outputTokens: 0 });
 const reconciliationRetryMilliseconds = 1_000;
@@ -70,8 +71,7 @@ function userFacingFailure(reason: unknown, jobId: string): string {
 
 function errorMetadata(reason: unknown): { errorType: string; errorCode?: string } {
   if (reason instanceof RunnerError) return { errorType: reason.name, errorCode: reason.code };
-  if (reason instanceof Error) return { errorType: reason.name || "Error" };
-  return { errorType: typeof reason };
+  return { errorType: errorType(reason) };
 }
 
 export class ConsoleReporter implements JobReporter {

@@ -1,9 +1,6 @@
 import type { RunnerDatabase } from "./database.js";
 import type { InboundEventRecord, IntegrationId } from "./types.js";
-
-function errorLabel(error: unknown): string {
-  return error instanceof Error ? error.name || "Error" : typeof error;
-}
+import { errorType } from "./values.js";
 
 /** Polls and retries one integration's durable inbox. */
 export class DurableInboxPump {
@@ -58,7 +55,7 @@ export class DurableInboxPump {
       await this.dispatch(event);
       this.database.completeInboundEvent(event.eventKey);
     } catch (error) {
-      const label = errorLabel(error);
+      const label = errorType(error);
       const delayMs = Math.min(60_000, 1_000 * (2 ** Math.min(event.attempts, 6)));
       this.database.retryInboundEvent(event.eventKey, label, delayMs);
       console.error(`${this.integrationName} inbox processing failed; the event will be retried`, label);
