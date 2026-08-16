@@ -18,7 +18,6 @@ export {
 } from "./slack/normalization.js";
 export { SlackSocketIngress, type SlackEventHandler } from "./slack/socket-ingress.js";
 export {
-  defaultSlackHttpHardening,
   hardenSlackRequestListener,
   SlackHttpIngress,
   SlackHttpSecurityLogger,
@@ -53,14 +52,6 @@ export class SlackGateway {
         logger: new SlackHttpSecurityLogger(),
         processBeforeResponse: true,
         signatureVerification: true,
-        customRoutes: [{
-          path: config.slack.http.healthPath,
-          method: "GET",
-          handler: (_request, response) => {
-            response.writeHead(200, { "content-type": "application/json; charset=utf-8" });
-            response.end('{"status":"ok"}');
-          },
-        }],
       });
       this.app = new App({ token: secrets.slackBotToken, receiver });
     }
@@ -75,8 +66,6 @@ export class SlackGateway {
         this.app,
         receiver,
         handler,
-        config.slack.http.host,
-        config.slack.http.port,
         config.slack.http,
       );
     } else {

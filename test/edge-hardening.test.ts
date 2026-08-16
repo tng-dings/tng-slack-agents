@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
-import { defaultSlackHttpHardening } from "../src/slack.js";
 
 test("NGINX edge bounds and buffers traffic before the private Bolt listener", async () => {
   const configuration = await readFile("deploy/nginx/slack-edge.conf", "utf8");
@@ -59,8 +58,7 @@ test("representative maximum-attachment Slack metadata fits the 256 KiB bound", 
     },
   });
 
-  assert(Buffer.byteLength(body) < defaultSlackHttpHardening.maxBodyBytes);
-  assert.equal(defaultSlackHttpHardening.maxBodyBytes, 256 * 1024);
+  assert(Buffer.byteLength(body) < 256 * 1024);
 });
 
 test("deployment evidence validates an explicitly selected effective NGINX configuration", async () => {

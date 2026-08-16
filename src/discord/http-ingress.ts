@@ -4,10 +4,16 @@ import {
   type RequestListener,
   type Server,
   type ServerOptions,
-  type ServerResponse,
 } from "node:http";
 import { InteractionResponseFlags, InteractionResponseType, InteractionType, verifyKey } from "discord-interactions";
 import type { DiscordConfig } from "../config.js";
+import {
+  RateLimitedHttpLogger,
+  readBoundedBody,
+  sendEmptyResponse,
+  sendJsonResponse,
+  type HttpSecurityLogSink,
+} from "../http.js";
 import type { DiscordAdapter } from "./adapter.js";
 import type { DiscordDurableInteractionHandler } from "./inbox.js";
 
@@ -22,112 +28,14 @@ export type DiscordSignatureVerifier = (
   publicKey: string,
 ) => Promise<boolean>;
 
-interface SecurityLogSink {
-  warn(message: string): void;
-  error(message: string): void;
-}
-
-interface LogBucket {
-  windowStartedAt: number;
-  count: number;
-  suppressionLogged: boolean;
-}
-
-export class DiscordHttpSecurityLogger {
-  private readonly buckets = new Map<string, LogBucket>();
-
+export class DiscordHttpSecurityLogger extends RateLimitedHttpLogger {
   constructor(
-    private readonly sink: SecurityLogSink = console,
-    private readonly maxPerMinute = 10,
-    private readonly now: () => number = Date.now,
-  ) {}
-
-  warn(category: string, message: string): void {
-    this.emit("warn", category, message);
+    sink: HttpSecurityLogSink = console,
+    maxPerMinute = 10,
+    now: () => number = Date.now,
+  ) {
+    super("Discord", sink, maxPerMinute, now);
   }
-
-  error(category: string, message: string): void {
-    this.emit("error", category, message);
-  }
-
-  private emit(level: "warn" | "error", category: string, message: string): void {
-    const timestamp = this.now();
-    let bucket = this.buckets.get(category);
-    if (!bucket || timestamp - bucket.windowStartedAt >= 60_000) {
-      bucket = { windowStartedAt: timestamp, count: 0, suppressionLogged: false };
-      this.buckets.set(category, bucket);
-    }
-    if (bucket.count < this.maxPerMinute) {
-      bucket.count += 1;
-      this.sink[level](message);
-    } else if (!bucket.suppressionLogged) {
-      bucket.suppressionLogged = true;
-      this.sink[level]("Further Discord HTTP receiver failures suppressed for this minute.");
-    }
-  }
-}
-
-function emptyResponse(response: ServerResponse, status: number, headers: Record<string, string> = {}): void {
-  response.writeHead(status, {
-    "cache-control": "no-store",
-    "content-length": "0",
-    "x-content-type-options": "nosniff",
-    ...headers,
-  });
-  response.end();
-}
-
-function jsonResponse(response: ServerResponse, status: number, value: unknown): void {
-  const body = JSON.stringify(value);
-  response.writeHead(status, {
-    "cache-control": "no-store",
-    "content-length": String(Buffer.byteLength(body)),
-    "content-type": "application/json; charset=utf-8",
-    "x-content-type-options": "nosniff",
-  });
-  response.end(body);
-}
-
-async function bufferWithinLimit(request: IncomingMessage, maximum: number): Promise<Buffer | undefined> {
-  return await new Promise<Buffer | undefined>((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let total = 0;
-    let settled = false;
-    const cleanup = (): void => {
-      request.off("data", onData);
-      request.off("end", onEnd);
-      request.off("aborted", onAborted);
-      request.off("error", onAborted);
-    };
-    const onData = (chunk: Buffer | Uint8Array): void => {
-      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-      total += buffer.length;
-      if (total > maximum) {
-        settled = true;
-        cleanup();
-        request.resume();
-        resolve(undefined);
-        return;
-      }
-      chunks.push(buffer);
-    };
-    const onEnd = (): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      resolve(Buffer.concat(chunks, total));
-    };
-    const onAborted = (): void => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(new Error("Request body was aborted"));
-    };
-    request.on("data", onData);
-    request.on("end", onEnd);
-    request.on("aborted", onAborted);
-    request.on("error", onAborted);
-  });
 }
 
 function singleHeader(request: IncomingMessage, name: string): string | undefined {
@@ -166,36 +74,36 @@ export function createDiscordRequestListener(options: DiscordRequestListenerOpti
       try {
         url = new URL(request.url ?? "", "http://private-listener.invalid");
       } catch {
-        emptyResponse(response, 400, { connection: "close" });
+        sendEmptyResponse(response, 400, { connection: "close" });
         return;
       }
       const exactPath = url.search === "";
       if (exactPath && url.pathname === options.http.healthPath) {
         if (request.method !== "GET") {
-          emptyResponse(response, 405, { allow: "GET", connection: "close" });
+          sendEmptyResponse(response, 405, { allow: "GET", connection: "close" });
           return;
         }
-        jsonResponse(response, 200, { status: "ok" });
+        sendJsonResponse(response, 200, { status: "ok" });
         return;
       }
       if (!exactPath || url.pathname !== options.http.interactionsPath) {
-        emptyResponse(response, 404, { connection: "close" });
+        sendEmptyResponse(response, 404, { connection: "close" });
         return;
       }
       if (request.method !== "POST") {
-        emptyResponse(response, 405, { allow: "POST", connection: "close" });
+        sendEmptyResponse(response, 405, { allow: "POST", connection: "close" });
         return;
       }
       const contentLength = singleHeader(request, "content-length");
       if (contentLength !== undefined) {
         const declared = Number(contentLength);
         if (!Number.isSafeInteger(declared) || declared < 0) {
-          emptyResponse(response, 400, { connection: "close" });
+          sendEmptyResponse(response, 400, { connection: "close" });
           return;
         }
         if (declared > options.http.maxBodyBytes) {
           request.resume();
-          emptyResponse(response, 413, { connection: "close" });
+          sendEmptyResponse(response, 413, { connection: "close" });
           return;
         }
       }
@@ -203,18 +111,18 @@ export function createDiscordRequestListener(options: DiscordRequestListenerOpti
       const timestamp = singleHeader(request, "x-signature-timestamp");
       if (!signature || !/^[0-9a-f]{128}$/i.test(signature) || !freshTimestamp(timestamp, now())) {
         logger.warn("authenticity", "Discord HTTP request rejected during authenticity validation.");
-        emptyResponse(response, 401, { connection: "close" });
+        sendEmptyResponse(response, 401, { connection: "close" });
         return;
       }
       try {
-        const rawBody = await bufferWithinLimit(request, options.http.maxBodyBytes);
+        const rawBody = await readBoundedBody(request, options.http.maxBodyBytes);
         if (!rawBody) {
-          emptyResponse(response, 413, { connection: "close" });
+          sendEmptyResponse(response, 413, { connection: "close" });
           return;
         }
         if (!await verifier(rawBody, signature, timestamp, options.publicKey)) {
           logger.warn("authenticity", "Discord HTTP request rejected during authenticity validation.");
-          emptyResponse(response, 401, { connection: "close" });
+          sendEmptyResponse(response, 401, { connection: "close" });
           return;
         }
         let interaction: unknown;
@@ -222,17 +130,17 @@ export function createDiscordRequestListener(options: DiscordRequestListenerOpti
           interaction = JSON.parse(rawBody.toString("utf8"));
         } catch {
           logger.warn("malformed", "Discord HTTP request rejected as malformed.");
-          emptyResponse(response, 400, { connection: "close" });
+          sendEmptyResponse(response, 400, { connection: "close" });
           return;
         }
         const value = interaction as Record<string, unknown>;
         if (value.type === InteractionType.PING) {
-          jsonResponse(response, 200, { type: InteractionResponseType.PONG });
+          sendJsonResponse(response, 200, { type: InteractionResponseType.PONG });
           return;
         }
         const prepared = options.adapter.prepareInteraction(interaction);
         if (prepared.kind === "rejected") {
-          jsonResponse(response, 200, {
+          sendJsonResponse(response, 200, {
             type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
             data: {
               content: prepared.message,
@@ -246,10 +154,10 @@ export function createDiscordRequestListener(options: DiscordRequestListenerOpti
           options.handler.accept(prepared.command);
         } catch {
           logger.error("storage", "Discord interaction could not be committed to durable storage.");
-          emptyResponse(response, 503, { connection: "close" });
+          sendEmptyResponse(response, 503, { connection: "close" });
           return;
         }
-        jsonResponse(response, 200, {
+        sendJsonResponse(response, 200, {
           type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
           data: {
             content: "Queued. I’ll post progress and the result in this channel.",
@@ -258,7 +166,7 @@ export function createDiscordRequestListener(options: DiscordRequestListenerOpti
         });
       } catch {
         logger.error("receiver", "Discord HTTP receiver error.");
-        if (!response.headersSent) emptyResponse(response, 400, { connection: "close" });
+        if (!response.headersSent) sendEmptyResponse(response, 400, { connection: "close" });
       }
     })();
   };

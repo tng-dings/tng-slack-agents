@@ -129,14 +129,6 @@ test("Slack HTTP ingress commits before acknowledgement and deduplicates retries
     logger: new SlackHttpSecurityLogger(),
     processBeforeResponse: true,
     signatureVerification: true,
-    customRoutes: [{
-      path: "/healthz",
-      method: "GET",
-      handler: (_request, response) => {
-        response.writeHead(200, { "content-type": "application/json" });
-        response.end('{"status":"ok"}');
-      },
-    }],
   });
   const app = new App({
     token: "xoxb-test",
@@ -147,7 +139,9 @@ test("Slack HTTP ingress commits before acknowledgement and deduplicates retries
     ignoreSelf: false,
   });
   const handler = new SlackDurableEventHandler(database, adapter, 5);
-  const ingress = new SlackHttpIngress(app, receiver, handler, "127.0.0.1", 0, {
+  const ingress = new SlackHttpIngress(app, receiver, handler, {
+    ...config.slack.http,
+    port: 0,
     maxBodyBytes: 1_024,
     maxHeaderBytes: 1_024,
     requestTimeoutMs: 250,
