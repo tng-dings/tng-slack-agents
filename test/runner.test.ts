@@ -896,8 +896,8 @@ test("Slack reporter edits its own working message when live updates are enabled
   await reporter.append("hello");
   await reporter.succeed("hello");
 
-  // The persisted delivery message is edited in place; no second message and no
-  // Slack-native stream is opened for the thread.
+  // The persisted delivery message is edited in place rather than answered with
+  // a second message in the thread.
   assert(!calls.some((call) => call.kind === "post"));
   const update = calls.find((call) => call.kind === "update")?.value as Record<string, unknown>;
   assert.equal(update.channel, "D1");
