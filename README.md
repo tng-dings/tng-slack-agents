@@ -12,7 +12,7 @@ This service accepts allowlisted Slack direct messages and Discord agent-thread 
 - Per-thread serialization, per-user/global concurrency limits, queue limit, timeout, allowlist, and daily cost cap.
 - Bounded JSONL and SQLite audit records containing content hashes/lengths, usage, failures, and tool metadata; automatic 30-day retention is enabled by default.
 - A branch-backed Git worktree per Slack or Discord session. The directory and `agent-runner/<session-hash>` branch are derived from the same 80-bit session hash. Running work is never silently replayed after a process crash; it is marked failed, while queued jobs survive.
-- The OpenCode deployment supports separate DPAPI-protected gateway and worker secret bundles and distinct Windows virtual service identities. The local Claude subprocess receives a restricted environment that excludes Slack and Discord credentials, and Claude is instructed to scrub provider credentials from Bash, hook, and MCP subprocesses.
+- The OpenCode deployment supports separate DPAPI-protected gateway and worker secret bundles and distinct Windows virtual service identities. The local Claude subprocess receives a restricted environment that excludes Slack and Discord credentials; provider credential values are included in delivery and audit redaction.
 
 ## PoC operating model
 
@@ -46,7 +46,7 @@ Select Claude Code without configuring or starting an OpenCode server:
 }
 ```
 
-`model` and `executablePath` are optional. `permissionMode` defaults to `bypassPermissions`; all Claude Agent SDK modes are accepted. The executor uses streaming SDK input and output, persists Claude's UUID as `providerSessionId`, passes it as `resume` on the next message in the Slack/Discord thread, and reuses the existing branch-backed worktree. Provider authentication, routing, and model variables for Anthropic, Bedrock, Vertex, and Foundry are forwarded from a fixed allowlist; integration tokens are not. `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` is enforced so Bash, hook, and MCP subprocesses do not inherit provider credentials, while delivery and audit redaction also cover those credential values.
+`model` and `executablePath` are optional. `permissionMode` defaults to `bypassPermissions`; all Claude Agent SDK modes are accepted. The executor uses streaming SDK input and output, persists Claude's UUID as `providerSessionId`, passes it as `resume` on the next message in the Slack/Discord thread, and reuses the existing branch-backed worktree. Provider authentication, routing, and model variables for Anthropic, Bedrock, Vertex, and Foundry are forwarded from a fixed allowlist; integration tokens are not. The executor verifies the effective permission mode reported by the Claude child and fails rather than silently accepting a downgrade.
 
 ## Interactive Windows: OpenCode two-terminal setup
 

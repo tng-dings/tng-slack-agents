@@ -71,9 +71,6 @@ export function claudeChildEnvironment(source: NodeJS.ProcessEnv): NodeJS.Proces
   for (const [name, value] of Object.entries(source)) {
     if (value !== undefined && isClaudeEnvironmentName(name)) result[name] = value;
   }
-  // Defense in depth: Claude needs provider credentials, but its Bash, hook, and
-  // MCP descendants should not inherit them.
-  result.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = "1";
   return result;
 }
 

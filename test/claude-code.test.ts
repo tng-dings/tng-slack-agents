@@ -87,7 +87,7 @@ test("Claude Code streams input/output, maps tools and usage, and resumes the du
     CLAUDE_CODE_OAUTH_TOKEN: "oauth-token",
     CLAUDE_CONFIG_DIR: "C:\\ProgramData\\AgentRunner\\claude",
     CLAUDE_CODE_USE_BEDROCK: "1",
-    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "0",
+    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1",
     AWS_BEARER_TOKEN_BEDROCK: "bedrock-token",
     AWS_REGION: "eu-central-1",
     ANTHROPIC_BEDROCK_BASE_URL: "https://bedrock.example",
@@ -208,7 +208,7 @@ test("Claude Code streams input/output, maps tools and usage, and resumes the du
   assert.equal(calls[0]?.options?.env?.ANTHROPIC_FOUNDRY_API_KEY, environment.ANTHROPIC_FOUNDRY_API_KEY);
   assert.equal(calls[0]?.options?.env?.ANTHROPIC_FOUNDRY_RESOURCE, environment.ANTHROPIC_FOUNDRY_RESOURCE);
   assert.equal(calls[0]?.options?.env?.VERTEX_REGION_CLAUDE_4_6_SONNET, environment.VERTEX_REGION_CLAUDE_4_6_SONNET);
-  assert.equal(calls[0]?.options?.env?.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, "1");
+  assert.equal(calls[0]?.options?.env?.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, undefined);
   assert.equal(calls[0]?.options?.env?.SLACK_BOT_TOKEN, undefined);
   assert.equal(calls[0]?.options?.env?.DISCORD_BOT_TOKEN, undefined);
   assert.equal(closeCount, 2);
@@ -240,11 +240,53 @@ test("Claude Code refuses to rebind a previously used OpenCode thread", async ()
   assert.equal(preparedWorkspace, false);
 });
 
+test("Claude Code fails when the child downgrades the configured permission mode", async () => {
+  const queryFactory = (() => {
+    const stream = async function* (): AsyncIterable<SDKMessage> {
+      yield {
+        type: "system",
+        subtype: "init",
+        permissionMode: "default",
+        session_id: sessionId,
+      } as unknown as SDKMessage;
+    };
+    return {
+      [Symbol.asyncIterator]: () => stream()[Symbol.asyncIterator](),
+      close: () => undefined,
+    } as unknown as Query;
+  });
+  const executor = new ClaudeCodeExecutor(
+    { workingRepository: ".", permissionMode: "acceptEdits" },
+    { prepare: async () => ".", cleanup: async () => undefined },
+    queryFactory,
+    () => sessionId,
+  );
+  const prepared = await executor.prepareSession(
+    job(),
+    session(),
+    { onWorkingDirectory: () => undefined },
+    AbortSignal.timeout(2_000),
+  );
+
+  await assert.rejects(
+    executor.executeTurn(
+      job(),
+      prepared,
+      { onText: () => undefined, onTool: () => undefined, onUsage: () => undefined },
+      AbortSignal.timeout(2_000),
+    ),
+    /permission mode default; expected acceptEdits/,
+  );
+});
+
 test("Claude Code cancellation aborts and closes the SDK query", async () => {
   const { root, repository, worktreeRoot } = await fixture();
   let finish: ((value: IteratorResult<SDKMessage>) => void) | undefined;
   let closed = false;
-  const queryFactory = (() => ({
+  let capturedOptions: Parameters<typeof import("@anthropic-ai/claude-agent-sdk").query>[0]["options"] | undefined;
+  const queryFactory = ((parameters: Parameters<typeof import("@anthropic-ai/claude-agent-sdk").query>[0]) => {
+    capturedOptions = parameters.options;
+    return ({
     [Symbol.asyncIterator]: () => ({
       next: () => new Promise<IteratorResult<SDKMessage>>((resolve) => { finish = resolve; }),
       return: async () => ({ value: undefined, done: true }),
@@ -253,9 +295,10 @@ test("Claude Code cancellation aborts and closes the SDK query", async () => {
       closed = true;
       finish?.({ value: undefined, done: true });
     },
-  }) as unknown as Query);
+    }) as unknown as Query;
+  });
   const executor = new ClaudeCodeExecutor(
-    { workingRepository: repository, permissionMode: "acceptEdits" },
+    { workingRepository: repository, permissionMode: "bypassPermissions" },
     { prepare: async () => worktreeRoot, cleanup: async () => undefined },
     queryFactory,
     () => sessionId,
@@ -278,5 +321,11 @@ test("Claude Code cancellation aborts and closes the SDK query", async () => {
   controller.abort(reason);
   await assert.rejects(execution, (error: unknown) => error === reason);
   assert.equal(closed, true);
+  if (process.getuid?.() === 0) {
+    assert.equal(capturedOptions?.permissionMode, "default");
+  } else {
+    assert.equal(capturedOptions?.permissionMode, "bypassPermissions");
+    assert.equal(capturedOptions?.allowDangerouslySkipPermissions, true);
+  }
   await rm(root, { recursive: true, force: true });
 });

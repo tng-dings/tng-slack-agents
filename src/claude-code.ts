@@ -121,7 +121,10 @@ async function emitToolEvents(message: SDKMessage, callbacks: ExecutionCallbacks
   }
 }
 
-function permissionOptions(config: ClaudeCodeConfig): Pick<Options, "permissionMode" | "allowDangerouslySkipPermissions" | "canUseTool"> {
+function permissionOptions(config: ClaudeCodeConfig): Pick<
+  Options,
+  "permissionMode" | "allowDangerouslySkipPermissions" | "canUseTool"
+> {
   if (config.permissionMode !== "bypassPermissions") return { permissionMode: config.permissionMode };
   if (process.getuid?.() === 0) {
     return {
@@ -130,6 +133,19 @@ function permissionOptions(config: ClaudeCodeConfig): Pick<Options, "permissionM
     };
   }
   return { permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true };
+}
+
+function assertEffectivePermissionMode(message: SDKMessage, config: ClaudeCodeConfig): void {
+  if (message.type !== "system" || message.subtype !== "init") return;
+  const expected = config.permissionMode === "bypassPermissions" && process.getuid?.() === 0
+    ? "default"
+    : config.permissionMode;
+  if (message.permissionMode !== expected) {
+    throw new ClaudeCodeError(
+      `Claude Code started with permission mode ${message.permissionMode}; expected ${expected}`,
+      "CLAUDE_CODE_PERMISSION_MODE_MISMATCH",
+    );
+  }
 }
 
 export class ClaudeCodeExecutor implements Executor {
@@ -205,6 +221,7 @@ export class ClaudeCodeExecutor implements Executor {
         if (message.session_id !== session.providerSessionId) {
           throw new ClaudeCodeError("Claude Code returned an unexpected session_id", "CLAUDE_CODE_SESSION_MISMATCH");
         }
+        assertEffectivePermissionMode(message, this.config);
         await emitTextDelta(message, callbacks);
         await emitToolEvents(message, callbacks);
         if (message.type === "result") {
