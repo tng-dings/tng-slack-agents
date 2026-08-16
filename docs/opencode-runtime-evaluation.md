@@ -52,8 +52,8 @@ Relevant implementation:
 - The gateway and worker use separate DPAPI bundles and Windows virtual identities.
 - `Start-OpenCode.ps1` refuses Slack and Discord credentials in the worker bundle.
 - Gateway Git subprocesses receive an allowlisted, secret-free environment.
-- OpenCode automatic updates and plugins are disabled.
-- External-directory access, web tools, subagents, skills, and interactive questions are denied.
+- `Start-OpenCode.ps1` disables OpenCode automatic updates and plugins.
+- It also denies external-directory access, web tools, subagents, skills, and interactive questions. A hand-started `opencode serve`, such as the README's interactive setup, does not get this policy.
 - Unknown OpenCode tools require permission, and unexpected permission requests are rejected by the coordinator.
 
 ### Queue and integration boundary
@@ -77,6 +77,8 @@ Relevant implementation:
 ## Original priority findings
 
 The findings in this section describe the reviewed baseline and the target design. Their implementation status is recorded in the phase checklists below.
+
+Read this section as history, not as a description of the current code. It quotes identifiers that no longer exist — `OpenCodeExecutor.execute()` was split into `prepareSession()`/`executeTurn()` in Phase 1, and `openCodeSessionId` became `providerId`/`providerSessionId` in Phase 2. The phase checklists and implementation notes are the authoritative status.
 
 ### P0: Execution resources are persisted only after a successful turn
 

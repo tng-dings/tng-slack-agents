@@ -4,6 +4,8 @@ This is the actionable gate for the first live Slack test. Do not add a tester t
 
 Every section below is completed once, by the operator, against the first installation. Each additional tester then only installs their own app and runner on their own machine, following [`docs/tester-onboarding.md`](../docs/tester-onboarding.md), and confirms that `npm run doctor` and `npm run smoke` pass and that one DM round-trip returns a result. Testers do not repeat the acceptance test; an installation is never shared.
 
+The operator preparation is executor-specific. OpenCode uses the AgentRunner and OpenCodeServer services with separate gateway and worker bundles. Claude Code uses AgentRunner only: skip the OpenCodeServer install, worker bundle, and OpenCode start steps, and provision with `Set-AgentRunnerSecrets.ps1 -Executor claude-code`. `npm run doctor` and every approval, allowlist, and acceptance item still apply to both executors.
+
 ## Slack administrator and security approval
 
 - [ ] Approve internal, non-Marketplace custom apps named **Company Coding Agent (*tester*)** in the test workspace, one per tester and capped at five.
