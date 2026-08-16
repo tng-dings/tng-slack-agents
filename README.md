@@ -2,6 +2,19 @@
 
 This service accepts allowlisted Slack direct messages and Discord agent-thread conversations, persists them as integration-namespaced jobs in SQLite, and runs them through either an authenticated localhost OpenCode server or a local Claude Code process on Windows. During uninterrupted operation, Slack threads and bot-created Discord threads retain the selected provider's session and a deterministic Git worktree on a dedicated local branch.
 
+## Project status
+
+Both executors have been exercised locally through Slack Socket Mode. Slack
+Events API and Discord interactions HTTP receivers are implemented, as are the
+Slack Socket Mode and Discord Gateway transports. The Windows-service topology
+and a real public HTTP deployment still require operator validation.
+
+The longer-term direction is a hosted orchestration application, likely on AWS,
+but no compute, persistence, queue, or worker architecture has been selected.
+See the [current architecture](docs/architecture.md), [active backlog](backlog/README.md),
+and [cloud decision backlog](backlog/integrations-http-cloud-roadmap.md) before
+starting deployment work.
+
 ## Current MVP behavior
 
 - Slack Bolt with configurable Socket Mode or Events API HTTPS ingress and the current `agent_view` experience.
@@ -27,7 +40,8 @@ This service accepts allowlisted Slack direct messages and Discord agent-thread 
 - Windows with Node.js 22.13 or later, Git, and a repository containing at least one commit.
 - For `opencode`, OpenCode installed natively (for example `npm install -g opencode-ai`) and a configured model provider.
 - For `claude-code`, a Claude Code login or supported Anthropic/provider credential available to the AgentRunner identity. The Agent SDK dependency includes its platform CLI; `claudeCode.executablePath` can override it.
-- An approved Slack app and/or Discord application. See the [Slack checklist](docs/slack-admin-checklist.md) and [Discord checklist](docs/discord-admin-checklist.md).
+- A Slack app created from the appropriate version-controlled manifest and/or a
+  Discord application configured with the [Discord checklist](docs/discord-admin-checklist.md).
 
 OpenCode officially recommends WSL for the best Windows compatibility, but this MVP intentionally supports native Windows. The executor interface allows a later WSL or remote-worker implementation without changing Slack or queue code.
 
@@ -144,7 +158,7 @@ Work executes on the machine that receives the Slack event, and Slack load-balan
 npm run slack:manifest -- --label "Simon"
 ```
 
-That prints [slack/manifest.json](slack/manifest.json) with only the app and bot display names changed, which is what Slack's **Create New App → From a manifest** dialog expects — Slack rejects a duplicate app name in a workspace. The full tester-facing procedure is [docs/tester-onboarding.md](docs/tester-onboarding.md); the administrator-facing version is the [Slack checklist](docs/slack-admin-checklist.md).
+That prints [slack/manifest.json](slack/manifest.json) with only the app and bot display names changed, which is what Slack's **Create New App → From a manifest** dialog expects—Slack rejects a duplicate app name in a workspace.
 
 Adding another person to `slack.allowedUserIds` is a different thing entirely: it grants them unsandboxed execution on *your* machine under *your* credentials. Keep that list to one member ID per installation.
 
@@ -182,9 +196,9 @@ npm run smoke
 npm run dev
 ```
 
-Do not configure an Interactions Endpoint URL in Gateway mode. AgentRunner opens an outbound WebSocket, durably accepts the slash command, acknowledges it without persisting the interaction token, creates a bot-owned public thread, and submits the first job against that thread ID. Later non-bot messages from the initiating user in that registered thread are durably deduplicated by Discord message ID and reuse the same OpenCode session and worktree.
+Do not configure an Interactions Endpoint URL in Gateway mode. AgentRunner opens an outbound WebSocket, durably accepts the slash command, acknowledges it without persisting the interaction token, creates a bot-owned public thread, and submits the first job against that thread ID. Later non-bot messages from the initiating user in that registered thread are durably deduplicated by Discord message ID and reuse the same provider session and worktree.
 
-The bot posts `Working…` and edits that message with the redacted result. Results are public to everyone who can view the thread. DMs, slash commands inside threads, unrelated threads, other users, bots, webhooks, and system messages are ignored or denied. Follow the [Discord administrator checklist](docs/discord-admin-checklist.md). The legacy `"http"` ingress accepts slash commands but does not ingest owner thread messages; use Gateway mode for conversations. HTTP mode must follow the shared [public endpoint hardening runbook](docs/public-endpoint-hardening.md).
+The bot posts `Working…` and edits that message with the redacted result. Results are public to everyone who can view the thread. DMs, slash commands inside threads, unrelated threads, other users, bots, webhooks, and system messages are ignored or denied. Follow the [Discord administrator checklist](docs/discord-admin-checklist.md). The `"http"` interactions ingress accepts slash commands but does not ingest owner thread messages; use Gateway mode for conversations. HTTP mode must follow the shared [public endpoint hardening runbook](docs/public-endpoint-hardening.md).
 
 ## Verification
 
@@ -194,9 +208,12 @@ npm test
 npm run build
 ```
 
-The suite uses a fake authenticated OpenCode HTTP/SSE server but real SQLite persistence and a real temporary Git worktree. No Slack or model credentials are required.
+The suite uses fake executor boundaries with real SQLite persistence and real temporary Git worktrees. No Slack or model credentials are required.
 
 ## Windows services
+
+The service definitions and provisioning scripts are prepared, but the complete
+installed-service acceptance pass is still an open validation gate.
 
 Build first, place a WinSW executable beside `service\AgentRunner.xml` as `AgentRunner.exe`, and copy the selected configuration to `%ProgramData%\AgentRunner\config.json`. Write the absolute `node.exe` location into `%ProgramData%\AgentRunner\node-path.txt`. Install AgentRunner before provisioning so its virtual service identity exists:
 
@@ -237,8 +254,8 @@ For OpenCode, omission of `-Executor` remains backward compatible. Install `Open
 
 Write the absolute `opencode.exe` location into `%ProgramData%\OpenCodeWorker\opencode-path.txt`. Grant both virtual identities read/execute access to this project; grant `NT SERVICE\OpenCodeServer` only the configured repository/worktree and `.git/worktrees` access needed by execution. Start OpenCode before AgentRunner.
 
-For either executor, `-SlackIngress events-api` stores `SLACK_SIGNING_SECRET` instead of `SLACK_APP_TOKEN`. Add `-EnableDiscord` for Discord. A Discord-only Gateway deployment may use `-SlackIngress disabled -EnableDiscord` and must also set `slack.enabled` to `false` in the configuration, since Slack is enabled unless switched off; legacy Discord HTTP ingress also requires `-DiscordIngress http`.
+For either executor, `-SlackIngress events-api` stores `SLACK_SIGNING_SECRET` instead of `SLACK_APP_TOKEN`. Add `-EnableDiscord` for Discord. A Discord-only Gateway deployment may use `-SlackIngress disabled -EnableDiscord` and must also set `slack.enabled` to `false` in the configuration, since Slack is enabled unless switched off; Discord interactions HTTP ingress also requires `-DiscordIngress http`.
 
 ## Security boundary
 
-Git worktrees prevent concurrent integration sessions from editing the same checkout, but they are not an OS sandbox. OpenCode retains the stronger gateway/worker identity and secret separation: integration credentials never enter its worker bundle or environment. In Claude mode, the SDK child environment omits Slack and Discord tokens, but this filtering is not an OS security boundary. In-process Claude runs with `bypassPermissions` by default under the same `NT SERVICE\AgentRunner` identity as the gateway and can potentially read the AgentRunner DPAPI bundle or any other resource available to that identity. Deploying Claude mode therefore explicitly accepts that risk. Before expanding beyond trusted testers, move execution into a VM or comparably hardened worker sandbox with network policy. See [the security notes](docs/security.md) and [security review](docs/security-review.md).
+Git worktrees prevent concurrent integration sessions from editing the same checkout, but they are not an OS sandbox. OpenCode retains the stronger gateway/worker identity and secret separation: integration credentials never enter its worker bundle or environment. In Claude mode, the SDK child environment omits Slack and Discord tokens, but this filtering is not an OS security boundary. In-process Claude runs with `bypassPermissions` by default under the same `NT SERVICE\AgentRunner` identity as the gateway and can potentially read the AgentRunner DPAPI bundle or any other resource available to that identity. Deploying Claude mode therefore explicitly accepts that risk. Before expanding beyond trusted testers, move execution into a VM or comparably hardened worker sandbox with network policy. See the [security review](docs/security-review.md).

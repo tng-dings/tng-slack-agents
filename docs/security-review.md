@@ -2,7 +2,7 @@
 
 ## Executive summary
 
-**Company Coding Agent** accepts allowlisted Slack direct messages and Discord agent-thread conversations and submits coding tasks to either a company-managed OpenCode worker or an in-process Claude Code executor. The preferred Slack Socket Mode and Discord Gateway transports are outbound connections with no public inbound HTTP endpoint; optional Slack Events API and legacy Discord HTTP modes use the separately reviewed edge controls below.
+**Company Coding Agent** accepts allowlisted Slack direct messages and Discord agent-thread conversations and submits coding tasks to either a company-managed OpenCode worker or an in-process Claude Code executor. Slack Socket Mode and Discord Gateway are outbound connections with no public inbound HTTP endpoint; Slack Events API and Discord interactions HTTP modes use the separately reviewed edge controls below.
 
 In OpenCode mode, the integration gateway and coding worker are separate Windows security principals. Enabled Slack and Discord credentials exist only in the gateway bundle and process, and the worker receives only its localhost password and approved provider credential. In Claude mode, the selected Claude credential shares AgentRunner's DPAPI bundle and OS identity with the integration gateway. Child-environment filtering excludes integration tokens from the SDK subprocess, but does not create an OS security boundary. A deploy-time validation script applies the checks for the selected executor without printing secret values.
 
@@ -14,13 +14,13 @@ The initial approval path below remains Socket Mode. An Events API deployment in
 
 In Events API mode, a managed TLS endpoint or hardened reverse proxy is the only internet-facing component. It forwards only `POST /slack/events` and the minimal health route to the private Node listener and enforces request-body, header, connection, request-time, and rate limits before Bolt buffers a request. Source IP allowlisting is not a substitute for Slack signature verification.
 
-The reviewed M2-D deployment is the version-controlled NGINX configuration in [`deploy/nginx/slack-edge.conf`](../deploy/nginx/slack-edge.conf), with the runbook and evidence procedure in [`public-endpoint-hardening.md`](public-endpoint-hardening.md). Application configuration permits only a loopback Bolt bind. NGINX buffers at most 256 KiB, constrains headers/connections/time, rate-limits both per source and globally, and logs no headers, query strings, or bodies. Receiver rejection logs are content-free and bounded. Production approval remains conditional on archived TLS, firewall/reachability, time-sync, and log-search evidence from the deployed host.
+The supplied edge deployment is the version-controlled NGINX configuration in [`deploy/nginx/slack-edge.conf`](../deploy/nginx/slack-edge.conf), with the runbook and evidence procedure in [`public-endpoint-hardening.md`](public-endpoint-hardening.md). Application configuration permits only loopback listener binds. NGINX buffers at most 256 KiB, constrains headers/connections/time, rate-limits both per source and globally, and logs no headers, query strings, or bodies. Receiver rejection logs are content-free and bounded. Production approval remains conditional on archived TLS, firewall/reachability, time-sync, and log-search evidence from the deployed host.
 
 Bolt verifies the unmodified request body, signature, and timestamp before dispatch. The adapter then validates the exact app ID, workspace, user, direct-message context, event type, and bot/subtype rules. Authorized messages are committed to a namespaced SQLite inbox before HTTP 200 is released. Attachment retrieval, job creation, and Slack delivery happen asynchronously; pending or interrupted inbox events recover after restart, and existing event/job keys make Slack retries idempotent. Invalid, stale, malformed, wrong-app, and unauthorized requests create no job.
 
 ## Discord Gateway deployment delta
 
-Discord is a guild-installed `/agent` application using an outbound authenticated Gateway connection. The command is registered only in configured guilds and accepted only from an exact allowlisted user in a normal guild channel. It creates a bot-owned public thread; ordinary messages from that same owner in the registered thread become follow-up jobs in one OpenCode session and worktree. DMs, unrelated threads, different users, bots, webhooks, and system messages are ignored or denied.
+Discord is a guild-installed `/agent` application using an outbound authenticated Gateway connection. The command is registered only in configured guilds and accepted only from an exact allowlisted user in a normal guild channel. It creates a bot-owned public thread; ordinary messages from that same owner in the registered thread become follow-up jobs in one provider session and worktree. DMs, unrelated threads, different users, bots, webhooks, and system messages are ignored or denied.
 
 The runner requests only Guilds, Guild Messages, and the privileged Message Content intent. There is no public Discord listener in Gateway mode. Interaction and message IDs are integration-namespaced idempotency keys. A small `discord_threads` registry binds each created thread to its guild, parent channel, and owner before job submission, so arbitrary guild threads cannot become execution sessions.
 
@@ -146,6 +146,7 @@ Archive the output with the approval ticket. The validation script detects the c
 5. The executor intentionally has shell/edit capability. Repository scripts and dependencies are executable content.
 6. Source and prompts are transmitted to the separately approved model provider.
 7. Slack and Discord token rotation is manual for the MVP. The incident owner can revoke enabled platform tokens immediately.
+8. Discord attachment CDN URLs are short-lived. A prolonged outage after durable acknowledgement can make an accepted image unavailable and require operator intervention.
 
 ## Approval requested
 

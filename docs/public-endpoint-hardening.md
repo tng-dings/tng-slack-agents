@@ -1,4 +1,4 @@
-# Slack and legacy Discord HTTP public endpoint hardening
+# Slack and Discord HTTP public endpoint hardening
 
 This is the production runbook for Slack Events API and optional `discord.ingress: "http"`. Slack Socket Mode and the default Discord Gateway mode do not use a public endpoint.
 
@@ -13,22 +13,22 @@ Internet
        -> Slack signature and timestamp verification
        -> app/workspace/user/DM authorization
        -> durable inbox
-  -> 127.0.0.1:3001 (optional legacy Discord interactions listener)
+  -> 127.0.0.1:3001 (optional Discord interactions listener)
        -> Ed25519 signature and timestamp verification
        -> application/guild/user/command authorization
        -> sanitized durable inbox
 ```
 
-The supported concrete HTTP deployment is a hardened NGINX instance on the same host as the service. [`deploy/nginx/slack-edge.conf`](../deploy/nginx/slack-edge.conf) terminates TLS and proxies Slack to `127.0.0.1:3000` and optional legacy Discord HTTP ingress to `127.0.0.1:3001`. Gateway-mode Discord requires neither route nor listener. Do not add a firewall port-forward, load-balancer target, or container port mapping for either private port.
+The supplied concrete HTTP deployment is a hardened NGINX instance on the same host as the service. [`deploy/nginx/slack-edge.conf`](../deploy/nginx/slack-edge.conf) terminates TLS and proxies Slack to `127.0.0.1:3000` and optional Discord interactions HTTP ingress to `127.0.0.1:3001`. Gateway-mode Discord requires neither route nor listener. Do not add a firewall port-forward, load-balancer target, or container port mapping for either private port.
 
-If a managed load balancer is introduced later, retain a same-host reverse proxy or add an equivalent private-listener control and deployment test. A security group alone does not make `0.0.0.0` an approved M2-D configuration.
+If a managed load balancer is introduced later, retain a same-host reverse proxy or add an equivalent private-listener control and deployment test. A security group alone does not make `0.0.0.0` an approved configuration.
 
 ## Edge installation
 
 1. Install a supported, patched NGINX release from the approved package source and run it under a dedicated unprivileged service identity.
 2. Copy `deploy/nginx/slack-edge.conf` into the NGINX configuration directory.
 3. Replace `slack-agent.example.com` and the certificate paths. Provision the certificate through the organization's managed certificate process. Restrict the private-key ACL to administrators, SYSTEM, and the NGINX identity.
-4. Keep Slack configured for `127.0.0.1:3000` and `/slack/events`. If legacy Discord HTTP ingress is enabled, keep it at `127.0.0.1:3001` and `/discord/interactions`. If a port or route changes, update and test the enabled configurations atomically.
+4. Keep Slack configured for `127.0.0.1:3000` and `/slack/events`. If Discord interactions HTTP ingress is enabled, keep it at `127.0.0.1:3001` and `/discord/interactions`. If a port or route changes, update and test the enabled configurations atomically.
 5. Validate the installed configuration with `nginx -t -c <installed-nginx.conf>`, start/reload NGINX using that same configuration, and confirm the only non-loopback listener is public TLS port 443. Do not expose an HTTP port merely to redirect it.
 6. Configure Slack's Request URL as `https://<approved-host>/slack/events`.
 7. Only for `discord.ingress: "http"`, configure Discord's Interactions Endpoint URL as `https://<approved-host>/discord/interactions`.
@@ -107,7 +107,7 @@ On suspected disclosure, block the affected public route, rotate the relevant si
 
 NGINX request access logging is disabled by default so floods cannot amplify logs; request-generated error messages below critical severity are also suppressed. Its defined `privacy` format excludes query strings, headers, and bodies and may be enabled only for an approved, time-bounded diagnostic. Bolt rejection logging emits only fixed categories, allows ten messages per category per minute, and then emits one suppression notice. Never enable debug request logging at the edge or receiver. Logs must not contain bodies, Slack signatures, timestamps paired with signatures, prompts, tokens, attachment metadata, or parser excerpts. Use rate-limit metrics from the managed edge/WAF for sustained monitoring rather than request logs.
 
-Dependabot and the scheduled `dependency-security` workflow monitor Node dependencies. Operators must:
+The scheduled `dependency-security` workflow monitors Node dependencies. Operators must:
 
 - deploy an actively supported Node LTS release allowed by `package.json`;
 - review weekly dependency updates, especially `@slack/bolt`, `@slack/web-api`, `@discordjs/ws`, `@discordjs/rest`, `discord-interactions`, NGINX, and Node;

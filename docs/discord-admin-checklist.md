@@ -1,6 +1,6 @@
 # Discord Gateway administrator checklist
 
-Discord uses an outbound Gateway WebSocket. A guild-scoped `/agent` command starts a bot-owned public thread, and later messages from the initiating user in that thread continue the same OpenCode session and Git worktree. The integration does not accept DMs or messages from unrelated threads.
+Discord uses an outbound Gateway WebSocket. A guild-scoped `/agent` command starts a bot-owned public thread, and later messages from the initiating user in that thread continue the same provider session and Git worktree. The integration does not accept DMs or messages from unrelated threads.
 
 ## Application setup
 
@@ -53,7 +53,7 @@ For a Discord-only Windows service deployment:
 ./scripts/Set-AgentRunnerSecrets.ps1 -SlackIngress disabled -EnableDiscord
 ```
 
-Discord credentials belong only in the AgentRunner gateway bundle. They must never be copied to the OpenCode worker bundle or provider environment. Legacy `discord.ingress: "http"` additionally requires `DISCORD_PUBLIC_KEY` and `-DiscordIngress http` during provisioning. HTTP mode accepts slash commands only; it does not receive ordinary owner messages from the created threads, so Gateway mode is required for conversational follow-ups.
+Discord credentials belong only in the AgentRunner gateway bundle. They must never be copied to the OpenCode worker bundle or provider environment. `discord.ingress: "http"` additionally requires `DISCORD_PUBLIC_KEY` and `-DiscordIngress http` during provisioning. HTTP mode accepts slash commands only; it does not receive ordinary owner messages from the created threads, so Gateway mode is required for conversational follow-ups.
 
 ## User-visible behavior
 
