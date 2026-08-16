@@ -1,5 +1,6 @@
 import type { WebClient } from "@slack/web-api";
 import type { RunnerDatabase } from "../database.js";
+import { DurableInboxPump } from "../inbox.js";
 import type { InboundEventRecord } from "../types.js";
 import type { SlackEventHandler } from "./socket-ingress.js";
 import { SlackAdapter } from "./adapter.js";
@@ -24,25 +25,20 @@ function slackPayload(event: InboundEventRecord): SlackInboxPayload {
   return { message: message as unknown as ParsedSlackMessage };
 }
 
-function errorLabel(error: unknown): string {
-  return error instanceof Error ? error.name || "Error" : typeof error;
-}
-
 /**
  * Commits authorized Slack events before HTTP acknowledgement, then performs
  * network I/O and runner submission outside the request lifecycle.
  */
 export class SlackDurableEventHandler implements SlackEventHandler {
-  private active: Promise<void> | undefined;
-  private timer: NodeJS.Timeout | undefined;
-  private started = false;
-  private stopping = false;
+  private readonly inbox: DurableInboxPump;
 
   constructor(
     private readonly database: RunnerDatabase,
     private readonly adapter: SlackAdapter,
-    private readonly pollIntervalMs: number,
-  ) {}
+    pollIntervalMs: number,
+  ) {
+    this.inbox = new DurableInboxPump(database, "slack", "Slack", pollIntervalMs, (event) => this.process(event));
+  }
 
   async handleMessage(message: unknown, body: unknown, _client: WebClient): Promise<void> {
     const prepared = this.adapter.prepareMessage(message, body);
@@ -54,7 +50,7 @@ export class SlackDurableEventHandler implements SlackEventHandler {
     this.database.insertInboundEvent("slack", prepared.message.sourceEventId, {
       message: prepared.message,
     } satisfies SlackInboxPayload);
-    setImmediate(() => this.pump());
+    this.inbox.wake();
   }
 
   async handleAppHome(event: unknown, body: unknown, _client: WebClient): Promise<void> {
@@ -62,43 +58,15 @@ export class SlackDurableEventHandler implements SlackEventHandler {
   }
 
   start(): void {
-    if (this.started) return;
-    this.started = true;
-    this.stopping = false;
-    this.database.recoverInboundEvents("slack");
-    this.timer = setInterval(() => this.pump(), this.pollIntervalMs);
-    this.timer.unref();
-    this.pump();
+    this.inbox.start();
   }
 
   async stop(): Promise<void> {
-    this.stopping = true;
-    this.started = false;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
-    await this.active?.catch(() => undefined);
-  }
-
-  private pump(): void {
-    if (!this.started || this.stopping || this.active) return;
-    const event = this.database.claimNextInboundEvent("slack");
-    if (!event) return;
-    const task = this.process(event).finally(() => {
-      if (this.active === task) this.active = undefined;
-      setImmediate(() => this.pump());
-    });
-    this.active = task;
+    await this.inbox.stop();
   }
 
   private async process(event: InboundEventRecord): Promise<void> {
-    try {
-      const payload = slackPayload(event);
-      await this.adapter.processMessage(payload.message, undefined, true);
-      this.database.completeInboundEvent(event.eventKey);
-    } catch (error) {
-      const delayMs = Math.min(60_000, 1_000 * (2 ** Math.min(event.attempts, 6)));
-      this.database.retryInboundEvent(event.eventKey, errorLabel(error), delayMs);
-      console.error("Slack inbox processing failed; the event will be retried", errorLabel(error));
-    }
+    const payload = slackPayload(event);
+    await this.adapter.processMessage(payload.message, undefined, true);
   }
 }

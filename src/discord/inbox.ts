@@ -1,4 +1,5 @@
 import type { RunnerDatabase } from "../database.js";
+import { DurableInboxPump } from "../inbox.js";
 import type { InboundEventRecord } from "../types.js";
 import type { DiscordAdapter } from "./adapter.js";
 import type { DiscordAttachmentReference, ParsedDiscordCommand } from "./normalization.js";
@@ -53,67 +54,34 @@ function persistedCommand(event: InboundEventRecord): ParsedDiscordCommand {
   };
 }
 
-function errorLabel(error: unknown): string {
-  return error instanceof Error ? error.name || "Error" : typeof error;
-}
-
 /** Durable handoff between the three-second HTTP acknowledgement and job submission. */
 export class DiscordDurableInteractionHandler {
-  private active: Promise<void> | undefined;
-  private timer: NodeJS.Timeout | undefined;
-  private started = false;
-  private stopping = false;
+  private readonly inbox: DurableInboxPump;
 
   constructor(
     private readonly database: RunnerDatabase,
     private readonly adapter: DiscordAdapter,
-    private readonly pollIntervalMs: number,
-  ) {}
+    pollIntervalMs: number,
+  ) {
+    this.inbox = new DurableInboxPump(database, "discord", "Discord", pollIntervalMs, (event) => this.process(event));
+  }
 
   accept(command: ParsedDiscordCommand): void {
     this.database.insertInboundEvent("discord", command.sourceEventId, {
       command,
     } satisfies DiscordInboxPayload);
-    setImmediate(() => this.pump());
+    this.inbox.wake();
   }
 
   start(): void {
-    if (this.started) return;
-    this.started = true;
-    this.stopping = false;
-    this.database.recoverInboundEvents("discord");
-    this.timer = setInterval(() => this.pump(), this.pollIntervalMs);
-    this.timer.unref();
-    this.pump();
+    this.inbox.start();
   }
 
   async stop(): Promise<void> {
-    this.stopping = true;
-    this.started = false;
-    if (this.timer) clearInterval(this.timer);
-    this.timer = undefined;
-    await this.active?.catch(() => undefined);
-  }
-
-  private pump(): void {
-    if (!this.started || this.stopping || this.active) return;
-    const event = this.database.claimNextInboundEvent("discord");
-    if (!event) return;
-    const task = this.process(event).finally(() => {
-      if (this.active === task) this.active = undefined;
-      setImmediate(() => this.pump());
-    });
-    this.active = task;
+    await this.inbox.stop();
   }
 
   private async process(event: InboundEventRecord): Promise<void> {
-    try {
-      await this.adapter.processCommand(persistedCommand(event), true);
-      this.database.completeInboundEvent(event.eventKey);
-    } catch (error) {
-      const delayMs = Math.min(60_000, 1_000 * (2 ** Math.min(event.attempts, 6)));
-      this.database.retryInboundEvent(event.eventKey, errorLabel(error), delayMs);
-      console.error("Discord inbox processing failed; the event will be retried", errorLabel(error));
-    }
+    await this.adapter.processCommand(persistedCommand(event), true);
   }
 }
