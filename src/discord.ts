@@ -1,4 +1,4 @@
-import type { RunnerConfig, RunnerSecrets } from "./config.js";
+import { redactableSecretValues, type RunnerConfig, type RunnerSecrets } from "./config.js";
 import type { RunnerDatabase } from "./database.js";
 import type { AgentRunner } from "./runner.js";
 import type { JobRecord, JobReporter } from "./types.js";
@@ -51,15 +51,7 @@ export class DiscordGateway {
     if (!config.discord.applicationId) throw new Error("Discord application ID is missing");
     if (!secrets.discordBotToken) throw new Error("Discord bot token is missing");
     this.api = new DiscordApiClient(secrets.discordBotToken);
-    const outputSecrets = [
-      secrets.openCodePassword,
-      secrets.discordBotToken,
-      secrets.slackBotToken ?? "",
-      secrets.slackAppToken ?? "",
-      secrets.slackSigningSecret ?? "",
-      ...(secrets.providerCredentials ?? []),
-    ];
-    this.adapter = new DiscordAdapter(config, this.api, database, outputSecrets);
+    this.adapter = new DiscordAdapter(config, this.api, database, redactableSecretValues(secrets));
     const handler = new DiscordDurableInteractionHandler(database, this.adapter, config.queue.pollIntervalMs);
     if (config.discord.ingress === "gateway") {
       this.ingress = new DiscordGatewayIngress(this.adapter, handler, this.api, secrets.discordBotToken);

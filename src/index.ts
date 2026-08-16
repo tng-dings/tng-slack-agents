@@ -1,6 +1,6 @@
 import { AuditLogger } from "./audit.js";
 import { ClaudeCodeExecutor } from "./claude-code.js";
-import { IntegrationAuthorizationPolicy, loadConfig, loadSecrets } from "./config.js";
+import { IntegrationAuthorizationPolicy, loadConfig, loadSecrets, redactableSecretValues } from "./config.js";
 import { RunnerDatabase } from "./database.js";
 import { DiscordGateway } from "./discord.js";
 import { IntegrationReporterRegistry } from "./integrations.js";
@@ -14,14 +14,12 @@ async function main(): Promise<void> {
   const config = await loadConfig();
   const secrets = loadSecrets(config);
   const database = new RunnerDatabase(config.storage.databasePath);
-  const audit = new AuditLogger(config.storage.auditLogPath, database, [
-    secrets.openCodePassword,
-    secrets.discordBotToken ?? "",
-    secrets.slackBotToken ?? "",
-    secrets.slackAppToken ?? "",
-    secrets.slackSigningSecret ?? "",
-    ...(secrets.providerCredentials ?? []),
-  ], config.limits.maxAuditEventCharacters);
+  const audit = new AuditLogger(
+    config.storage.auditLogPath,
+    database,
+    redactableSecretValues(secrets),
+    config.limits.maxAuditEventCharacters,
+  );
   const workspaces = new WorkspaceManager(config.workingRepository, config.storage.worktreeRoot);
   const executor: Executor = config.executor === "opencode"
     ? new OpenCodeExecutor(

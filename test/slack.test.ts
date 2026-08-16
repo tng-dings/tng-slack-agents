@@ -39,14 +39,16 @@ function clientDouble(calls: Array<{ kind: string; value: unknown }>): WebClient
   } as unknown as WebClient;
 }
 
-test("Slack delivery redacts Claude provider credentials", async () => {
+test("Slack delivery redacts every configured credential, including other integrations", async () => {
   const config = testConfig(".");
   const calls: Array<{ kind: string; value: unknown }> = [];
   const adapter = new SlackAdapter(
     config,
     {
-      openCodePassword: "",
+      openCodePassword: "opencode-password-secret",
       slackBotToken: "xoxb-secret",
+      slackSigningSecret: "slack-signing-secret",
+      discordBotToken: "discord-bot-token-secret",
       providerCredentials: ["claude-provider-secret"],
     },
     clientDouble(calls),
@@ -57,9 +59,16 @@ test("Slack delivery redacts Claude provider credentials", async () => {
     deliveryMessageId: "reply-ts",
   } as JobRecord);
 
-  await reporter.succeed("result: claude-provider-secret");
+  await reporter.succeed(
+    "result: claude-provider-secret opencode-password-secret slack-signing-secret discord-bot-token-secret",
+  );
   const update = calls.find((call) => call.kind === "update")?.value as { text: string };
+  // A credential belonging to another integration must not survive delivery here
+  // merely because this reporter is the Slack one.
   assert.doesNotMatch(update.text, /claude-provider-secret/);
+  assert.doesNotMatch(update.text, /opencode-password-secret/);
+  assert.doesNotMatch(update.text, /slack-signing-secret/);
+  assert.doesNotMatch(update.text, /discord-bot-token-secret/);
   assert.match(update.text, /\[REDACTED\]/);
 });
 
