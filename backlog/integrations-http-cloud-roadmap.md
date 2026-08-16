@@ -70,6 +70,7 @@ Repository follow-up after live approval:
 - [x] Use a deterministic named branch for each session, reattach it after clean worktree retention, and preserve dirty worktrees and all local branches.
 - [ ] Continue the remaining Phase 3 workspace maturity work only when needed: explicit lifecycle state, source revision metadata, bounded setup, safe orphan discovery, and preserve/archive/delete behavior.
 - [ ] Implement authenticated [Slack agent commands](slack-agent-commands.md) for explicit workspace inspection and cleanup.
+- [ ] Consolidate the duplicated [shared ingress internals](shared-ingress-internals.md) across the Slack and Discord transports. Quality work with no behavior change; not a dependency of any milestone here.
 - [ ] Retain `opencode_session_id` for at least one compatibility milestone; remove it only through a later reviewed additive migration after rollback compatibility is no longer required.
 - [ ] Begin the Phase 4 ACP experiment only after lifecycle correctness and the native HTTP/SSE compatibility baseline are proven. Keep it behind the provider-neutral executor seam rather than replacing the durable gateway/queue.
 
