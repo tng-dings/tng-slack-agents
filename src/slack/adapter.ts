@@ -1,4 +1,5 @@
 import type { WebClient } from "@slack/web-api";
+import { isSupportedImageMime } from "../attachments.js";
 import { redactableSecretValues, type RunnerConfig, type RunnerSecrets } from "../config.js";
 import { RunnerError } from "../errors.js";
 import type { AgentRunner } from "../runner.js";
@@ -11,7 +12,6 @@ import {
   type ParsedSlackMessage,
 } from "./normalization.js";
 
-const IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 type SlackRunner = Pick<AgentRunner, "submit">;
 
 export interface SlackAdapterOptions {
@@ -148,7 +148,7 @@ export class SlackAdapter {
       if (typeof file !== "object" || file === null) continue;
       const value = file as Record<string, unknown>;
       const mimetype = typeof value.mimetype === "string" ? value.mimetype : "";
-      if (!IMAGE_MIME_TYPES.has(mimetype)) continue;
+      if (!isSupportedImageMime(mimetype)) continue;
       const candidate = typeof value.url_private_download === "string"
         ? value.url_private_download
         : typeof value.url_private === "string" ? value.url_private : "";
@@ -180,7 +180,7 @@ export class SlackAdapter {
       if (typeof file !== "object" || file === null) continue;
       const value = file as Record<string, unknown>;
       const mime = typeof value.mimetype === "string" ? value.mimetype : "";
-      if (!IMAGE_MIME_TYPES.has(mime)) continue;
+      if (!isSupportedImageMime(mime)) continue;
       const url = typeof value.url_private_download === "string"
         ? value.url_private_download
         : typeof value.url_private === "string" ? value.url_private : "";

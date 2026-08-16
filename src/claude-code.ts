@@ -8,6 +8,7 @@ import {
   type SDKResultMessage,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
+import { isSupportedImageMime } from "./attachments.js";
 import type { ClaudeCodeConfig } from "./config.js";
 import { claudeChildEnvironment } from "./claude-environment.js";
 import { ClaudeCodeError } from "./errors.js";
@@ -50,7 +51,7 @@ function dataUrlPayload(dataUrl: string): string {
 function inputMessage(job: JobRecord, sessionId: string): SDKUserMessage {
   const content: Array<Record<string, unknown>> = [{ type: "text", text: job.prompt }];
   for (const attachment of job.attachments) {
-    if (!["image/png", "image/jpeg", "image/gif", "image/webp"].includes(attachment.mime)) {
+    if (!isSupportedImageMime(attachment.mime)) {
       throw new ClaudeCodeError(`Claude Code does not support attachment type ${attachment.mime}`, "CLAUDE_CODE_ATTACHMENT_ERROR");
     }
     content.push({

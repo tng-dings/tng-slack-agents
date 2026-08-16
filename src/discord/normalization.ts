@@ -1,17 +1,11 @@
 import { MessageType } from "discord-api-types/v10";
+import { isSupportedImageMime } from "../attachments.js";
 import type { Attachment, DiscordThreadRecord, JobSubmission } from "../types.js";
 
 const DISCORD_APPLICATION_COMMAND = 2;
 const DISCORD_STRING_OPTION = 3;
 const DISCORD_ATTACHMENT_OPTION = 11;
 const DISCORD_TOP_LEVEL_CHANNEL_TYPES = new Set([0, 5]);
-
-export const DISCORD_IMAGE_MIME_TYPES = new Set([
-  "image/png",
-  "image/jpeg",
-  "image/gif",
-  "image/webp",
-]);
 
 export interface DiscordAttachmentReference {
   readonly id: string;
@@ -89,7 +83,7 @@ function attachmentReference(data: Record<string, unknown>): DiscordAttachmentRe
     attachment.size < 0 ||
     typeof attachment.url !== "string"
   ) return undefined;
-  if (!DISCORD_IMAGE_MIME_TYPES.has(attachment.content_type)) return undefined;
+  if (!isSupportedImageMime(attachment.content_type)) return undefined;
   let url: URL;
   try {
     url = new URL(attachment.url);
@@ -208,7 +202,7 @@ export function parseDiscordThreadMessage(
       typeof value.id !== "string" ||
       typeof value.filename !== "string" ||
       typeof value.content_type !== "string" ||
-      !DISCORD_IMAGE_MIME_TYPES.has(value.content_type) ||
+      !isSupportedImageMime(value.content_type) ||
       typeof value.size !== "number" ||
       !Number.isSafeInteger(value.size) ||
       value.size < 0 ||
