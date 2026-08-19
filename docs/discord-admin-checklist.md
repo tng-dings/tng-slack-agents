@@ -50,10 +50,10 @@ npm run dev
 For a Discord-only Windows service deployment:
 
 ```powershell
-./scripts/Set-AgentRunnerSecrets.ps1 -SlackIngress disabled -EnableDiscord
+./scripts/Set-AgentRunnerSecrets.ps1
 ```
 
-Discord credentials belong only in the AgentRunner gateway bundle. They must never be copied to the OpenCode worker bundle or provider environment. `discord.ingress: "http"` additionally requires `DISCORD_PUBLIC_KEY` and `-DiscordIngress http` during provisioning. HTTP mode accepts slash commands only; it does not receive ordinary owner messages from the created threads, so Gateway mode is required for conversational follow-ups.
+The provisioner derives disabled Slack and enabled Discord from the reviewed `config.json`. Discord credentials belong only in the AgentRunner gateway bundle. They must never be copied to an executor's provider-credential bundle or exposed to an executor child environment. `discord.ingress: "http"` additionally requests `DISCORD_PUBLIC_KEY` during provisioning. HTTP mode accepts slash commands only; it does not receive ordinary owner messages from the created threads, so Gateway mode is required for conversational follow-ups.
 
 ## User-visible behavior
 
@@ -69,7 +69,7 @@ Discord credentials belong only in the AgentRunner gateway bundle. They must nev
 Archive the following without secret values:
 
 - `npm run check`, `npm test`, `npm run build`, and `npm run security:audit`;
-- `npm run doctor` showing `gateway:agent` for the Discord credential check;
+- `npm run doctor` passing the Discord credential, allowlist-ID, and bot/application identity checks;
 - successful command registration in each allowlisted guild;
 - successful Gateway connection without a public Discord listener;
 - one `/agent` invocation creating a thread, a completed initial result, and two owner follow-ups sharing the same session/worktree;

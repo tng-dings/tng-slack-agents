@@ -5,7 +5,9 @@ import {
   DiscordAdapter,
   DiscordApiClient,
   DiscordDurableInteractionHandler,
+  DiscordGateway,
   DiscordGatewayIngress,
+  DiscordHttpIngress,
   DiscordJobReporter,
   discordGuildCommand,
   parseDiscordCommand,
@@ -14,7 +16,7 @@ import {
   type DiscordSessionApi,
 } from "../src/discord.js";
 import type { JobRecord, JobSubmission } from "../src/types.js";
-import { testConfig } from "./helpers.js";
+import { testConfig, testJob } from "./helpers.js";
 
 function interaction(overrides: Record<string, unknown> = {}): Record<string, unknown> {
   return {
@@ -59,6 +61,34 @@ function discordJob(deliveryMessageId: string | null = null): JobRecord {
     finishedAt: null,
   };
 }
+
+test("Discord gateway composes the configured public ingress boundary", () => {
+  const database = new RunnerDatabase(":memory:");
+  const config = testConfig(".");
+  config.discord.enabled = true;
+  config.discord.applicationId = "123456789012345678";
+  try {
+    const gateway = new DiscordGateway(config, {
+      openCodePassword: "password",
+      discordBotToken: "bot-token",
+    }, database);
+    assert(gateway.ingress instanceof DiscordGatewayIngress);
+
+    config.discord.ingress = "http";
+    const httpGateway = new DiscordGateway(config, {
+      openCodePassword: "password",
+      discordBotToken: "bot-token",
+      discordPublicKey: "a".repeat(64),
+    }, database);
+    assert(httpGateway.ingress instanceof DiscordHttpIngress);
+    assert.throws(
+      () => new DiscordGateway(config, { openCodePassword: "password", discordBotToken: "bot-token" }, database),
+      /Discord public key is missing/,
+    );
+  } finally {
+    database.close();
+  }
+});
 
 test("Discord guild command uses only supported attachment-option fields", () => {
   const config = testConfig(".");
@@ -215,7 +245,7 @@ test("Discord adapter authorizes before submission and downloads a bounded image
   adapter.attachRunner({
     submit: async (submission) => {
       submissions.push(submission);
-      return { job: {} as JobRecord, isNew: true };
+      return { job: testJob({ integration: "discord" }), isNew: true };
     },
   });
   await adapter.processCommand(prepared.command, true);
@@ -286,7 +316,7 @@ test("top-level command creates one owned thread and follow-ups reuse its sessio
   adapter.attachRunner({
     submit: async (submission) => {
       submissions.push(submission);
-      return { job: {} as JobRecord, isNew: true };
+      return { job: testJob({ integration: "discord" }), isNew: true };
     },
   });
   const prepared = adapter.prepareInteraction(interaction());
@@ -418,7 +448,7 @@ test("Discord replay re-authorizes before creating a thread or downloading an at
     fetch: async () => { fetchCalls += 1; return new Response(); },
   });
   adapter.attachRunner({
-    submit: async () => { submissions += 1; return { job: {} as JobRecord, isNew: true }; },
+    submit: async () => { submissions += 1; return { job: testJob({ integration: "discord" }), isNew: true }; },
   });
   await adapter.processCommand({
     sourceEventId: "stale-interaction",

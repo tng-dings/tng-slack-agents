@@ -2,6 +2,7 @@ import { execFile } from "node:child_process";
 import { access } from "node:fs/promises";
 import { promisify } from "node:util";
 import { loadConfig, loadSecrets } from "../config.js";
+import { DISCORD_USER_AGENT } from "../discord/delivery.js";
 import { unprivilegedChildEnvironment } from "../environment.js";
 import { parseHealth } from "../opencode-protocol.js";
 import { assertApprovedOpenCodeVersion } from "../opencode-version.js";
@@ -107,6 +108,46 @@ async function main(): Promise<void> {
           throw new Error("DISCORD_PUBLIC_KEY must be a 64-character hexadecimal Ed25519 public key");
         }
         return `${config.discord.ingress}:${config.discord.commandName}`;
+      },
+    });
+    checks.push({
+      name: "Discord allowlist identifier shapes",
+      run: async () => {
+        const snowflake = /^[0-9]{17,20}$/;
+        if (!config.discord.applicationId || !snowflake.test(config.discord.applicationId)) {
+          throw new Error("discord.applicationId must be a 17-20 digit Discord application ID");
+        }
+        for (const guildId of config.discord.allowedGuildIds) {
+          if (!snowflake.test(guildId)) {
+            throw new Error(`discord.allowedGuildIds contains "${guildId}"; copy the numeric server ID from Discord`);
+          }
+        }
+        for (const userId of config.discord.allowedUserIds) {
+          if (!snowflake.test(userId)) {
+            throw new Error(`discord.allowedUserIds contains "${userId}"; copy the numeric user ID from Discord`);
+          }
+        }
+        return `${config.discord.allowedGuildIds.length} guild(s), ${config.discord.allowedUserIds.length} user(s)`;
+      },
+    });
+    checks.push({
+      name: "Discord bot token and application match",
+      run: async () => {
+        const response = await fetch("https://discord.com/api/v10/oauth2/applications/@me", {
+          headers: {
+            authorization: `Bot ${secrets.discordBotToken}`,
+            "user-agent": DISCORD_USER_AGENT,
+          },
+          redirect: "error",
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const body = await response.json() as { id?: string; name?: string };
+        if (!body.id) throw new Error("Discord response did not include the application ID");
+        if (body.id !== config.discord.applicationId) {
+          throw new Error(`This bot token belongs to application ${body.id}, not configured application ${config.discord.applicationId}`);
+        }
+        return `${body.name ?? "application"} (${body.id})`;
       },
     });
   }

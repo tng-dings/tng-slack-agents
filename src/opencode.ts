@@ -26,11 +26,7 @@ import {
   type OpenCodePart,
 } from "./opencode-protocol.js";
 import { assertApprovedOpenCodeVersion } from "./opencode-version.js";
-import { errorType } from "./values.js";
-
-function isObject(value: unknown): value is JsonObject {
-  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
-}
+import { errorMetadata, isRecord } from "./values.js";
 
 function outputFromParts(parts: OpenCodePart[]): string {
   return parts
@@ -40,14 +36,9 @@ function outputFromParts(parts: OpenCodePart[]): string {
 }
 
 function errorMessage(value: unknown): string {
-  if (isObject(value) && typeof value.message === "string") return value.message;
+  if (isRecord(value) && typeof value.message === "string") return value.message;
   if (typeof value === "string") return value;
   return JSON.stringify(value).slice(0, 2_000);
-}
-
-function errorMetadata(value: unknown): { errorType: string; errorCode?: string } {
-  if (value instanceof OpenCodeError) return { errorType: value.name, errorCode: value.code };
-  return { errorType: errorType(value) };
 }
 
 export class OpenCodeExecutor implements Executor {
@@ -361,7 +352,7 @@ export class OpenCodeExecutor implements Executor {
               boundary = buffer.indexOf("\n\n");
               continue;
             }
-            if (!isObject(parsed)) {
+            if (!isRecord(parsed)) {
               await this.audit.log("opencode_schema_mismatch", {
                 schema: "event",
                 ...describePayloadShape(parsed),

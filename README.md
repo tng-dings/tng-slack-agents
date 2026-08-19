@@ -1,6 +1,6 @@
 # Self-hosted Slack and Discord agent runner
 
-This service accepts allowlisted Slack direct messages and Discord agent-thread conversations, persists them as integration-namespaced jobs in SQLite, and runs them through either an authenticated localhost OpenCode server or a local Claude Code process on Windows. During uninterrupted operation, Slack threads and bot-created Discord threads retain the selected provider's session and a deterministic Git worktree on a dedicated local branch.
+This service accepts allowlisted Slack direct messages and Discord agent-thread conversations, persists them as integration-namespaced jobs in SQLite, and runs them through either an authenticated localhost OpenCode server or a local Claude Code process on Windows. During uninterrupted operation, Slack threads and bot-created Discord threads retain the selected executor's provider session and a deterministic Git worktree on a dedicated local branch.
 
 ## Project status
 
@@ -148,7 +148,7 @@ npm run smoke
 npm run dev
 ```
 
-Enter the `xoxb-...` value for `SLACK_BOT_TOKEN` and the `xapp-...` value for `SLACK_APP_TOKEN`; do not paste either value into source files or ordinary Slack messages. `npm run dev` remains in the foreground and connects to Slack over an outbound WebSocket. Keep both terminals open while testing, stop the gateway with `Ctrl+C`, and then stop OpenCode. Only exact workspace IDs in `slack.allowedWorkspaceIds` and user IDs in `slack.allowedUserIds` can enqueue work. Start with a disposable repository and a single allowlisted tester.
+Enter the `xoxb-...` value for `SLACK_BOT_TOKEN` and the `xapp-...` value for `SLACK_APP_TOKEN`; do not paste either value into source files or ordinary Slack messages. `npm run dev` remains in the foreground and connects to Slack over an outbound WebSocket. Stop the gateway with `Ctrl+C`; if the selected executor uses a separately started process, stop that process afterward. Only exact workspace IDs in `slack.allowedWorkspaceIds` and user IDs in `slack.allowedUserIds` can enqueue work. Start with a disposable repository and a single allowlisted tester.
 
 ## Multiple testers: one bot per person
 
@@ -225,7 +225,6 @@ For Claude Code, set `executor` to `claude-code`, set `storage.worktreeRoot` to 
 
 ```powershell
 .\scripts\Set-AgentRunnerSecrets.ps1 `
-  -Executor claude-code `
   -ClaudeCredentialName ANTHROPIC_API_KEY
 ```
 
@@ -233,7 +232,6 @@ The OAuth-token alternative is:
 
 ```powershell
 .\scripts\Set-AgentRunnerSecrets.ps1 `
-  -Executor claude-code `
   -ClaudeCredentialName CLAUDE_CODE_OAUTH_TOKEN
 ```
 
@@ -245,7 +243,7 @@ Claude mode needs only `AgentRunner.exe`; do not install, provision, or start `O
 .\service\AgentRunner.exe start
 ```
 
-For OpenCode, omission of `-Executor` remains backward compatible. Install `OpenCodeServer.exe`, then provision the existing split gateway/worker bundles:
+For OpenCode, install `OpenCodeServer.exe`, then provision the existing split gateway/worker bundles:
 
 ```powershell
 .\service\OpenCodeServer.exe install
@@ -254,7 +252,7 @@ For OpenCode, omission of `-Executor` remains backward compatible. Install `Open
 
 Write the absolute `opencode.exe` location into `%ProgramData%\OpenCodeWorker\opencode-path.txt`. Grant both virtual identities read/execute access to this project; grant `NT SERVICE\OpenCodeServer` only the configured repository/worktree and `.git/worktrees` access needed by execution. Start OpenCode before AgentRunner.
 
-For either executor, `-SlackIngress events-api` stores `SLACK_SIGNING_SECRET` instead of `SLACK_APP_TOKEN`. Add `-EnableDiscord` for Discord. A Discord-only Gateway deployment may use `-SlackIngress disabled -EnableDiscord` and must also set `slack.enabled` to `false` in the configuration, since Slack is enabled unless switched off; Discord interactions HTTP ingress also requires `-DiscordIngress http`.
+The provisioner reads executor and integration modes from `%ProgramData%\AgentRunner\config.json`; use `-ConfigPath` for a different reviewed configuration. Add `-ValidateConfigurationOnly` to print and validate the selected modes without checking service identities, changing ACLs, or prompting for secrets. The legacy `-Executor`, `-SlackIngress`, `-EnableDiscord`, and `-DiscordIngress` parameters remain accepted only when they agree with that file, so a stale provisioning command fails instead of writing the wrong credential bundle. Slack Events API mode requests `SLACK_SIGNING_SECRET`, Socket Mode requests `SLACK_APP_TOKEN`, and enabled Discord HTTP ingress requests `DISCORD_PUBLIC_KEY` automatically.
 
 ## Security boundary
 

@@ -16,7 +16,7 @@ import type {
   SubmissionResult,
   Usage,
 } from "./types.js";
-import { errorType } from "./values.js";
+import { asRecord, errorMetadata, isRecord } from "./values.js";
 
 const emptyUsage = (): Usage => ({ cost: 0, inputTokens: 0, outputTokens: 0 });
 const reconciliationRetryMilliseconds = 1_000;
@@ -52,11 +52,9 @@ function attachmentByteLength(attachment: Attachment): number {
 }
 
 function toolMetadata(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return { type: typeof value };
-  const event = value as Record<string, unknown>;
-  const state = event.state && typeof event.state === "object" && !Array.isArray(event.state)
-    ? event.state as Record<string, unknown>
-    : {};
+  if (!isRecord(value)) return { type: typeof value };
+  const event = value;
+  const state = asRecord(event.state);
   return {
     ...(typeof event.tool === "string" ? { tool: event.tool } : {}),
     ...(typeof event.callID === "string" ? { callId: event.callID } : {}),
@@ -67,11 +65,6 @@ function toolMetadata(value: unknown): Record<string, unknown> {
 function userFacingFailure(reason: unknown, jobId: string): string {
   if (reason instanceof TimeoutError || reason instanceof LimitError) return reason.message;
   return `The agent job failed. Reference: ${jobId}`;
-}
-
-function errorMetadata(reason: unknown): { errorType: string; errorCode?: string } {
-  if (reason instanceof RunnerError) return { errorType: reason.name, errorCode: reason.code };
-  return { errorType: errorType(reason) };
 }
 
 export class ConsoleReporter implements JobReporter {

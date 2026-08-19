@@ -223,8 +223,6 @@ export class RunnerDatabase {
         created_at TEXT NOT NULL
       );
 
-      CREATE INDEX IF NOT EXISTS discord_threads_guild_owner_idx
-        ON discord_threads(guild_id, owner_user_id);
     `);
 
     const jobColumns = this.sqlite.prepare("PRAGMA table_info(jobs)").all() as Row[];
@@ -269,10 +267,14 @@ export class RunnerDatabase {
     if (!normalizedJobColumns.some((col) => String(col.name) === "delivery_message_id")) {
       this.sqlite.exec("ALTER TABLE jobs ADD COLUMN delivery_message_id TEXT; UPDATE jobs SET delivery_message_id = reply_ts WHERE reply_ts IS NOT NULL;");
     }
-    this.sqlite.exec("CREATE INDEX IF NOT EXISTS jobs_actor_status_idx ON jobs(actor_id, status)");
-    // The legacy user_id column is still written for rollback compatibility but
-    // is never queried; jobs_actor_status_idx supersedes its index.
-    this.sqlite.exec("DROP INDEX IF EXISTS jobs_user_status_idx");
+    // Current job-limit queries use the integration/tenant/actor composite
+    // index created below. Discord thread lookup uses the primary key. Remove
+    // indexes left by older builds that no current query can use effectively.
+    this.sqlite.exec(`
+      DROP INDEX IF EXISTS jobs_user_status_idx;
+      DROP INDEX IF EXISTS jobs_actor_status_idx;
+      DROP INDEX IF EXISTS discord_threads_guild_owner_idx;
+    `);
 
     const sessionColumns = this.sqlite.prepare("PRAGMA table_info(sessions)").all() as Row[];
     if (!sessionColumns.some((col) => String(col.name) === "execution_generation")) {

@@ -35,7 +35,7 @@ export interface DiscordConfig {
   };
 }
 
-export type ExecutorProvider = "opencode" | "claude-code";
+export type ExecutorId = "opencode" | "claude-code";
 
 export interface OpenCodeConfig {
   baseUrl: string;
@@ -243,7 +243,7 @@ function discordIngress(value: unknown): DiscordIngressTransport {
   return result;
 }
 
-function executorProvider(value: unknown): ExecutorProvider {
+function executorId(value: unknown): ExecutorId {
   const result = value ?? "opencode";
   if (result !== "opencode" && result !== "claude-code") {
     throw new Error('executor must be "opencode" or "claude-code"');
@@ -307,7 +307,7 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
   const slackHttp = object(slack.http ?? {}, "slack.http");
   const discord = object(root.discord ?? {}, "discord");
   const discordHttp = object(discord.http ?? {}, "discord.http");
-  const executor = executorProvider(root.executor);
+  const executor = executorId(root.executor);
   const openCode = executor === "opencode" ? object(root.openCode, "openCode") : undefined;
   const claudeCode = executor === "claude-code" ? object(root.claudeCode, "claudeCode") : undefined;
   const limits = object(root.limits ?? {}, "limits");
@@ -403,7 +403,7 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
     ? undefined
     : string(claudeCode.model, "claudeCode.model").trim();
 
-  const providerConfig = executor === "opencode" ? {
+  const selectedExecutorConfig = executor === "opencode" ? {
     executor,
     workingRepository: resolvePath(openCode!.workingRepository, "openCode.workingRepository", baseDirectory),
     openCode: {
@@ -427,7 +427,7 @@ export async function loadConfig(configPath = process.env.AGENT_RUNNER_CONFIG ??
   } as const;
 
   return {
-    ...providerConfig,
+    ...selectedExecutorConfig,
     integrations: {
       slack: { allowedTenants: allowedWorkspaceIds, allowedActors: allowedUserIds },
       ...(discordEnabled ? {

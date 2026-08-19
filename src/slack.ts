@@ -25,13 +25,28 @@ export {
 } from "./slack/http-ingress.js";
 export { SlackDurableEventHandler } from "./slack/inbox.js";
 
+export interface SlackGatewayDependencies {
+  createApp(options: ConstructorParameters<typeof App>[0]): App;
+  createHttpReceiver(options: ConstructorParameters<typeof HTTPReceiver>[0]): HTTPReceiver;
+}
+
+const defaultSlackGatewayDependencies: SlackGatewayDependencies = {
+  createApp: (options) => new App(options),
+  createHttpReceiver: (options) => new HTTPReceiver(options),
+};
+
 /** Selects one Slack ingress while sharing normalization, processing, and delivery. */
 export class SlackGateway {
   readonly app: App;
   readonly adapter: SlackAdapter;
   readonly ingress: SlackSocketIngress | SlackHttpIngress;
 
-  constructor(config: RunnerConfig, secrets: RunnerSecrets, database: RunnerDatabase) {
+  constructor(
+    config: RunnerConfig,
+    secrets: RunnerSecrets,
+    database: RunnerDatabase,
+    dependencies: SlackGatewayDependencies = defaultSlackGatewayDependencies,
+  ) {
     if (!secrets.slackBotToken) throw new Error("Slack bot token is missing");
     if (config.slack.ingress === "socket" && !secrets.slackAppToken) throw new Error("Slack app token is missing");
     if (config.slack.ingress === "events-api" && !secrets.slackSigningSecret) {
@@ -40,20 +55,20 @@ export class SlackGateway {
 
     let receiver: HTTPReceiver | undefined;
     if (config.slack.ingress === "socket") {
-      this.app = new App({
+      this.app = dependencies.createApp({
         token: secrets.slackBotToken,
         appToken: secrets.slackAppToken!,
         socketMode: true,
       });
     } else {
-      receiver = new HTTPReceiver({
+      receiver = dependencies.createHttpReceiver({
         signingSecret: secrets.slackSigningSecret!,
         endpoints: config.slack.http.eventsPath,
         logger: new SlackHttpSecurityLogger(),
         processBeforeResponse: true,
         signatureVerification: true,
       });
-      this.app = new App({ token: secrets.slackBotToken, receiver });
+      this.app = dependencies.createApp({ token: secrets.slackBotToken, receiver });
     }
     this.adapter = new SlackAdapter(
       config,

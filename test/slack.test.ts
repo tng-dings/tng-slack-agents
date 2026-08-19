@@ -1,13 +1,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { App } from "@slack/bolt";
+import type { App, HTTPReceiver } from "@slack/bolt";
 import type { WebClient } from "@slack/web-api";
+import { RunnerDatabase } from "../src/database.js";
 import {
   normalizeSlackMessage,
   parseSlackMessage,
   SlackAdapter,
+  SlackGateway,
+  SlackHttpIngress,
   SlackSocketIngress,
   type SlackEventHandler,
+  type SlackGatewayDependencies,
 } from "../src/slack.js";
 import type { JobRecord, JobSubmission } from "../src/types.js";
 import { testConfig } from "./helpers.js";
@@ -38,6 +42,57 @@ function clientDouble(calls: Array<{ kind: string; value: unknown }>): WebClient
     },
   } as unknown as WebClient;
 }
+
+test("Slack gateway composes the configured public ingress boundary", () => {
+  const database = new RunnerDatabase(":memory:");
+  const config = testConfig(".");
+  config.slack.enabled = true;
+  const app = {
+    client: clientDouble([]),
+    message: () => undefined,
+    event: () => undefined,
+    start: async () => undefined,
+    stop: async () => undefined,
+  } as unknown as App;
+  const receiver = {} as HTTPReceiver;
+  const appOptions: Array<Record<string, unknown>> = [];
+  const dependencies: SlackGatewayDependencies = {
+    createApp: (options) => {
+      appOptions.push(options as Record<string, unknown>);
+      return app;
+    },
+    createHttpReceiver: () => receiver,
+  };
+  try {
+    const socketGateway = new SlackGateway(config, {
+      openCodePassword: "password",
+      slackBotToken: "xoxb-test",
+      slackAppToken: "xapp-test",
+    }, database, dependencies);
+    assert(socketGateway.ingress instanceof SlackSocketIngress);
+    assert.equal(appOptions[0]?.socketMode, true);
+
+    config.slack.ingress = "events-api";
+    const httpGateway = new SlackGateway(config, {
+      openCodePassword: "password",
+      slackBotToken: "xoxb-test",
+      slackSigningSecret: "signing-secret",
+    }, database, dependencies);
+    assert(httpGateway.ingress instanceof SlackHttpIngress);
+    assert.equal(appOptions[1]?.receiver, receiver);
+    assert.throws(
+      () => new SlackGateway(
+        config,
+        { openCodePassword: "password", slackBotToken: "xoxb-test" },
+        database,
+        dependencies,
+      ),
+      /Slack signing secret is missing/,
+    );
+  } finally {
+    database.close();
+  }
+});
 
 test("Slack delivery redacts every configured credential, including other integrations", async () => {
   const config = testConfig(".");

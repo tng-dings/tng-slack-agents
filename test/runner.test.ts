@@ -711,6 +711,7 @@ test("database idempotently upgrades legacy Slack identity rows", async () => {
       started_at TEXT,
       finished_at TEXT
     );
+    CREATE INDEX jobs_user_status_idx ON jobs(user_id, status);
     INSERT INTO sessions VALUES ('T1:D1:1.0', 'T1', 'D1', '1.0', 'oc-1', '/worktree', '2026-01-01', '2026-01-01');
     INSERT INTO jobs(
       id, source_event_id, session_key, workspace_id, channel_id, thread_ts,
@@ -743,6 +744,10 @@ test("database idempotently upgrades legacy Slack identity rows", async () => {
   );
   assert.equal(migrated.getSession("slack:T1:D1:1.0")?.integration, "slack");
   assert.equal(job?.deliveryMessageId, "legacy-reply");
+  migrated.sqlite.exec(`
+    CREATE INDEX jobs_actor_status_idx ON jobs(actor_id, status);
+    CREATE INDEX discord_threads_guild_owner_idx ON discord_threads(guild_id, owner_user_id);
+  `);
   migrated.close();
 
   const reopened = new RunnerDatabase(filename);
@@ -763,6 +768,11 @@ test("database idempotently upgrades legacy Slack identity rows", async () => {
     provider_id: "opencode",
     provider_session_id: "oc-1",
   });
+  const jobIndexes = reopened.sqlite.prepare("PRAGMA index_list(jobs)").all() as Array<{ name: string }>;
+  const discordThreadIndexes = reopened.sqlite.prepare("PRAGMA index_list(discord_threads)").all() as Array<{ name: string }>;
+  assert(!jobIndexes.some((index) => index.name === "jobs_user_status_idx"));
+  assert(!jobIndexes.some((index) => index.name === "jobs_actor_status_idx"));
+  assert(!discordThreadIndexes.some((index) => index.name === "discord_threads_guild_owner_idx"));
   reopened.close();
   await rm(root, { recursive: true, force: true });
 });

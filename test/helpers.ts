@@ -1,6 +1,52 @@
 import { IntegrationAuthorizationPolicy, type OpenCodeRunnerConfig, type RunnerConfig } from "../src/config.js";
 import type { RunnerDatabase } from "../src/database.js";
-import type { Executor } from "../src/types.js";
+import type { Executor, JobRecord } from "../src/types.js";
+
+export interface TestConfigDocument {
+  [key: string]: unknown;
+  executor?: unknown;
+  slack: Record<string, unknown> & { http?: Record<string, unknown> };
+  discord: Record<string, unknown> & { http?: Record<string, unknown> };
+  openCode: Record<string, unknown>;
+  claudeCode?: Record<string, unknown>;
+  storage: Record<string, unknown>;
+  limits?: Record<string, unknown>;
+  queue?: Record<string, unknown>;
+}
+
+/** Minimal on-disk configuration input for parser tests, before defaults are applied. */
+export function testConfigDocument(
+  root: string,
+  overrides: Partial<TestConfigDocument> = {},
+): TestConfigDocument {
+  const slack = {
+    enabled: false,
+    allowedWorkspaceIds: [],
+    allowedUserIds: [],
+    ...overrides.slack,
+  };
+  const openCode = {
+    baseUrl: "http://127.0.0.1:4096",
+    workingRepository: root,
+    approvedVersions: ["test"],
+    ...overrides.openCode,
+  };
+  const storage = {
+    databasePath: "runner.db",
+    auditLogPath: "audit.jsonl",
+    worktreeRoot: "worktrees",
+    ...overrides.storage,
+  };
+  const discord = { ...overrides.discord };
+  return {
+    executor: "opencode",
+    ...overrides,
+    slack,
+    discord,
+    openCode,
+    storage,
+  };
+}
 
 export function testConfig(root: string): OpenCodeRunnerConfig {
   return {
@@ -77,6 +123,33 @@ export function testConfig(root: string): OpenCodeRunnerConfig {
       retainJobContent: true,
     },
     queue: { pollIntervalMs: 5 },
+  };
+}
+
+export function testJob(overrides: Partial<JobRecord> = {}): JobRecord {
+  const integration = overrides.integration ?? "slack";
+  return {
+    id: "test-job",
+    integration,
+    sourceEventId: "test-event",
+    sessionKey: `${integration}:T1:D1:1.0`,
+    tenantId: "T1",
+    conversationId: "D1",
+    threadId: "1.0",
+    deliveryMessageId: null,
+    actorId: "U_ALLOWED",
+    prompt: "test prompt",
+    attachments: [],
+    status: "queued",
+    output: "",
+    error: null,
+    cost: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    createdAt: "2026-01-01T00:00:00.000Z",
+    startedAt: null,
+    finishedAt: null,
+    ...overrides,
   };
 }
 

@@ -1,25 +1,109 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 import { AuditLogger } from "../src/audit.js";
 import { loadConfig, loadSecrets } from "../src/config.js";
 import { RunnerDatabase } from "../src/database.js";
+import { RunnerError } from "../src/errors.js";
 import { AgentRunner } from "../src/runner.js";
 import { personalizeSlackManifest } from "../src/slack/manifest.js";
 import { unprivilegedChildEnvironment } from "../src/environment.js";
 import type { Executor, JobReporter } from "../src/types.js";
-import { testAuthorizationPolicy, testConfig, testExecutor, waitFor } from "./helpers.js";
+import { errorMetadata } from "../src/values.js";
+import { testAuthorizationPolicy, testConfig, testConfigDocument, testExecutor, waitFor } from "./helpers.js";
+
+const execFileAsync = promisify(execFile);
+
+test("safe error metadata preserves only the shared error type and runner code", () => {
+  assert.deepEqual(errorMetadata(new RunnerError("sensitive detail", "SAFE_CODE")), {
+    errorType: "RunnerError",
+    errorCode: "SAFE_CODE",
+  });
+  assert.deepEqual(errorMetadata(new Error("sensitive detail")), { errorType: "Error" });
+  assert.deepEqual(errorMetadata("sensitive detail"), { errorType: "string" });
+});
+
+test("example configuration loads with the reviewed runtime defaults", async () => {
+  const config = await loadConfig("config.example.json");
+  assert.equal(config.executor, "opencode");
+  if (config.executor !== "opencode") assert.fail("example must select OpenCode");
+  assert.equal(config.openCode.baseUrl, "http://127.0.0.1:4096");
+  assert.equal(config.openCode.username, "opencode");
+  assert.deepEqual(config.openCode.approvedVersions, ["REPLACE_WITH_VALIDATED_OPENCODE_VERSION"]);
+  assert.deepEqual(config.slack, {
+    enabled: true,
+    ingress: "socket",
+    appId: "A0123456789",
+    allowedWorkspaceIds: ["T0123456789"],
+    allowedUserIds: ["U0123456789"],
+    liveUpdates: false,
+    http: {
+      host: "127.0.0.1",
+      port: 3000,
+      eventsPath: "/slack/events",
+      healthPath: "/healthz",
+      maxBodyBytes: 262_144,
+      maxHeaderBytes: 16_384,
+      requestTimeoutMs: 5_000,
+      headersTimeoutMs: 5_000,
+      keepAliveTimeoutMs: 5_000,
+      maxRequestsPerSocket: 100,
+      maxConnections: 100,
+    },
+  });
+  assert.deepEqual(config.discord, {
+    enabled: false,
+    ingress: "gateway",
+    applicationId: "123456789012345678",
+    commandName: "agent",
+    allowedGuildIds: ["123456789012345678"],
+    allowedUserIds: ["123456789012345678"],
+    maxOutputCharacters: 20_000,
+    http: {
+      host: "127.0.0.1",
+      port: 3001,
+      interactionsPath: "/discord/interactions",
+      healthPath: "/healthz",
+      maxBodyBytes: 262_144,
+      maxHeaderBytes: 16_384,
+      requestTimeoutMs: 2_500,
+      headersTimeoutMs: 2_500,
+      keepAliveTimeoutMs: 5_000,
+      maxRequestsPerSocket: 100,
+      maxConnections: 100,
+    },
+  });
+  assert.deepEqual(config.limits, {
+    maxConcurrentJobsPerUser: 1,
+    maxConcurrentJobsGlobal: 1,
+    maxQueuedJobsPerUser: 3,
+    jobTimeoutSeconds: 1_800,
+    dailyCostCap: 5,
+    maxPromptCharacters: 12_000,
+    maxOutputCharacters: 100_000,
+    maxAuditEventCharacters: 32_000,
+    maxToolEventsPerJob: 500,
+    maxAttachmentsPerJob: 4,
+    maxAttachmentBytes: 5_000_000,
+  });
+  assert.deepEqual(config.storage, {
+    databasePath: path.resolve("data/agent-runner.db"),
+    auditLogPath: path.resolve("data/audit.jsonl"),
+    worktreeRoot: path.resolve("../OpenCodeWorker/worktrees"),
+    retentionDays: 30,
+    retainJobContent: false,
+  });
+  assert.deepEqual(config.queue, { pollIntervalMs: 250 });
+});
 
 test("configuration rejects a non-loopback OpenCode endpoint", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-config-"));
   const filename = path.join(root, "config.json");
-  const config = {
-    slack: { enabled: false, allowedWorkspaceIds: [], allowedUserIds: [] },
-    openCode: { baseUrl: "http://example.com:4096", workingRepository: root },
-    storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
-  };
+  const config = testConfigDocument(root, { openCode: { baseUrl: "http://example.com:4096" } });
   await writeFile(filename, JSON.stringify(config));
   await assert.rejects(loadConfig(filename), /127\.0\.0\.1/);
   await rm(root, { recursive: true, force: true });
@@ -28,11 +112,7 @@ test("configuration rejects a non-loopback OpenCode endpoint", async () => {
 test("configuration rejects unsafe native Slack streaming", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-streaming-config-"));
   const filename = path.join(root, "config.json");
-  const config = {
-    slack: { enabled: false, allowedWorkspaceIds: [], allowedUserIds: [], nativeStreaming: true },
-    openCode: { baseUrl: "http://127.0.0.1:4096", workingRepository: root },
-    storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
-  };
+  const config = testConfigDocument(root, { slack: { nativeStreaming: true } });
   await writeFile(filename, JSON.stringify(config));
   await assert.rejects(loadConfig(filename), /cannot be safely redacted/);
   await rm(root, { recursive: true, force: true });
@@ -41,17 +121,17 @@ test("configuration rejects unsafe native Slack streaming", async () => {
 test("configuration loads a Discord-only deployment that omits the Slack allowlists", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-discord-only-config-"));
   const filename = path.join(root, "config.json");
-  const config = {
-    slack: { enabled: false },
+  const config = testConfigDocument(root, {
     discord: {
       enabled: true,
       applicationId: "123456789012345678",
       allowedGuildIds: ["123456789012345678"],
       allowedUserIds: ["123456789012345678"],
     },
-    openCode: { baseUrl: "http://127.0.0.1:4096", workingRepository: root, approvedVersions: ["1.2.3"] },
-    storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
-  };
+    openCode: { approvedVersions: ["1.2.3"] },
+  });
+  delete config.slack.allowedWorkspaceIds;
+  delete config.slack.allowedUserIds;
   await writeFile(filename, JSON.stringify(config));
   const loaded = await loadConfig(filename);
   assert.equal(loaded.slack.enabled, false);
@@ -81,15 +161,11 @@ test("configuration loads a Discord-only deployment that omits the Slack allowli
 test("configuration accepts only an explicit OpenCode version allowlist", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-opencode-version-config-"));
   const filename = path.join(root, "config.json");
-  const config = {
-    slack: { enabled: false, allowedWorkspaceIds: [], allowedUserIds: [] },
+  const config = testConfigDocument(root, {
     openCode: {
-      baseUrl: "http://127.0.0.1:4096",
-      workingRepository: root,
       approvedVersions: ["1.2.3", "1.2.4"],
     },
-    storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
-  };
+  });
   await writeFile(filename, JSON.stringify(config));
   const loaded = await loadConfig(filename);
   assert.equal(loaded.executor, "opencode");
@@ -102,12 +178,10 @@ test("configuration accepts only an explicit OpenCode version allowlist", async 
 test("configuration selects Claude Code without OpenCode settings or password", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-claude-config-"));
   const filename = path.join(root, "config.json");
-  await writeFile(filename, JSON.stringify({
+  await writeFile(filename, JSON.stringify(testConfigDocument(root, {
     executor: "claude-code",
-    slack: { enabled: false, allowedWorkspaceIds: [], allowedUserIds: [] },
     claudeCode: { workingRepository: root, model: "claude-sonnet-4-5" },
-    storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
-  }));
+  })));
   const previousPassword = process.env.OPENCODE_SERVER_PASSWORD;
   const previousClaudeCredential = process.env.ANTHROPIC_API_KEY;
   delete process.env.OPENCODE_SERVER_PASSWORD;
@@ -127,18 +201,14 @@ test("configuration selects Claude Code without OpenCode settings or password", 
     if (previousClaudeCredential === undefined) delete process.env.ANTHROPIC_API_KEY;
     else process.env.ANTHROPIC_API_KEY = previousClaudeCredential;
   }
-  await writeFile(filename, JSON.stringify({
+  await writeFile(filename, JSON.stringify(testConfigDocument(root, {
     executor: "claude-code",
-    slack: { enabled: false, allowedWorkspaceIds: [], allowedUserIds: [] },
     claudeCode: { workingRepository: root, model: 42 },
-    storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
-  }));
+  })));
   await assert.rejects(loadConfig(filename), /claudeCode\.model/);
-  await writeFile(filename, JSON.stringify({
+  await writeFile(filename, JSON.stringify(testConfigDocument(root, {
     executor: "unknown",
-    slack: { enabled: false, allowedWorkspaceIds: [], allowedUserIds: [] },
-    storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
-  }));
+  })));
   await assert.rejects(loadConfig(filename), /executor must be/);
   await rm(root, { recursive: true, force: true });
 });
@@ -215,7 +285,7 @@ test("Discord credentials match the selected ingress", () => {
 test("Discord configuration defaults to Gateway with a bounded legacy HTTP option", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-discord-config-"));
   const filename = path.join(root, "config.json");
-  const config = {
+  const config = testConfigDocument(root, {
     discord: {
       enabled: true,
       applicationId: "APP1",
@@ -224,10 +294,7 @@ test("Discord configuration defaults to Gateway with a bounded legacy HTTP optio
       allowedUserIds: ["U1"],
       http: { host: "127.0.0.1", port: 3001, interactionsPath: "/discord/interactions" },
     },
-    slack: { enabled: false, allowedWorkspaceIds: [], allowedUserIds: [] },
-    openCode: { baseUrl: "http://127.0.0.1:4096", workingRepository: root },
-    storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
-  };
+  });
   await writeFile(filename, JSON.stringify(config));
   const loaded = await loadConfig(filename);
   assert.equal(loaded.discord.ingress, "gateway");
@@ -251,7 +318,7 @@ test("Discord configuration defaults to Gateway with a bounded legacy HTTP optio
 test("Events API configuration requires an app ID and explicit HTTP routes", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-http-config-"));
   const filename = path.join(root, "config.json");
-  const config = {
+  const config = testConfigDocument(root, {
     slack: {
       enabled: true,
       ingress: "events-api",
@@ -259,9 +326,7 @@ test("Events API configuration requires an app ID and explicit HTTP routes", asy
       allowedUserIds: ["U1"],
       http: { host: "127.0.0.1", port: 4000, eventsPath: "/slack/events", healthPath: "/healthz" },
     },
-    openCode: { baseUrl: "http://127.0.0.1:4096", workingRepository: root },
-    storage: { databasePath: "runner.db", auditLogPath: "audit.jsonl", worktreeRoot: "worktrees" },
-  };
+  });
   await writeFile(filename, JSON.stringify(config));
   await assert.rejects(loadConfig(filename), /slack\.appId/);
   await writeFile(filename, JSON.stringify({ ...config, slack: { ...config.slack, appId: "A1" } }));
@@ -388,7 +453,56 @@ test("OpenCode launcher is wired only to the worker secret bundle", async () => 
   assert.match(gatewayService, /NT SERVICE\\AgentRunner/);
 });
 
-test("Windows service provisioning accepts only supported Claude credentials and keeps OpenCode as the default", async () => {
+test("Windows provisioner validates config-selected modes before privileged writes", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "agent-runner-provisioning-config-"));
+  const filename = path.join(root, "config.json");
+  const config = testConfigDocument(root, {
+    executor: "claude-code",
+    slack: { enabled: true, ingress: "events-api" },
+    discord: { enabled: true, ingress: "http" },
+    claudeCode: { workingRepository: root },
+  });
+  await writeFile(filename, JSON.stringify(config));
+  const args = [
+    "-NoProfile",
+    "-NonInteractive",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    "scripts/Set-AgentRunnerSecrets.ps1",
+    "-ConfigPath",
+    filename,
+    "-ValidateConfigurationOnly",
+  ];
+  try {
+    const { stdout } = await execFileAsync("powershell.exe", args, { timeout: 10_000 });
+    assert.match(stdout, /executor=claude-code, slack=events-api, discord=http/);
+    await assert.rejects(
+      execFileAsync("powershell.exe", [...args, "-Executor", "opencode"], { timeout: 10_000 }),
+      (error: unknown) => error instanceof Error && /conflicts with config\.executor claude-code/.test(error.message),
+    );
+    for (const [description, malformedConfig] of [
+      ["empty executor", { ...config, executor: "" }],
+      ["array executor", { ...config, executor: ["claude-code"] }],
+      ["unknown Slack ingress", { ...config, slack: { ...config.slack, enabled: false, ingress: "invalid" } }],
+      ["empty Slack ingress", { ...config, slack: { ...config.slack, ingress: "" } }],
+      ["array Slack ingress", { ...config, slack: { ...config.slack, ingress: ["events-api"] } }],
+      ["blank Discord ingress", { ...config, discord: { ...config.discord, ingress: " " } }],
+      ["array Discord ingress", { ...config, discord: { ...config.discord, ingress: ["http"] } }],
+    ] as const) {
+      await writeFile(filename, JSON.stringify(malformedConfig));
+      await assert.rejects(
+        execFileAsync("powershell.exe", args, { timeout: 10_000 }),
+        (error: unknown) => error instanceof Error && /must be "opencode" or "claude-code"|must be a string|ingress must be/.test(error.message),
+        description,
+      );
+    }
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Windows service provisioning follows reviewed config and accepts only supported Claude credentials", async () => {
   const provisioner = await readFile("scripts/Set-AgentRunnerSecrets.ps1", "utf8");
   const launcher = await readFile("scripts/Start-AgentRunner.ps1", "utf8");
   const securityAudit = await readFile("scripts/Test-AgentRunnerSecurity.ps1", "utf8");

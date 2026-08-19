@@ -15,8 +15,8 @@ import {
   SlackHttpIngress,
   SlackHttpSecurityLogger,
 } from "../src/slack.js";
-import type { JobRecord, JobSubmission } from "../src/types.js";
-import { testConfig, waitFor } from "./helpers.js";
+import type { JobSubmission } from "../src/types.js";
+import { testConfig, testJob, waitFor } from "./helpers.js";
 
 const signingSecret = "test-signing-secret";
 
@@ -119,7 +119,7 @@ test("Slack HTTP ingress commits before acknowledgement and deduplicates retries
     submit: async (submission) => {
       submissions.push(submission);
       await submissionGate;
-      return { job: {} as JobRecord, isNew: true };
+      return { job: testJob(), isNew: true };
     },
   });
 
@@ -337,7 +337,7 @@ test("Slack inbox recovers an event claimed before restart", async () => {
   adapter.attachRunner({
     submit: async (submission) => {
       submissions.push(submission);
-      return { job: {} as JobRecord, isNew: true };
+      return { job: testJob(), isNew: true };
     },
   });
   const handler = new SlackDurableEventHandler(reopened, adapter, 5);

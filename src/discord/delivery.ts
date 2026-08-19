@@ -4,7 +4,7 @@ import type { JobRecord, JobReporter } from "../types.js";
 import { asRecord } from "../values.js";
 
 const DISCORD_API_BASE_URL = "https://discord.com/api/v10";
-const DISCORD_USER_AGENT = "DiscordBot (https://github.com/tng-dings/tng-slack-agents, 0.1.0)";
+export const DISCORD_USER_AGENT = "DiscordBot (https://github.com/tng-dings/tng-slack-agents, 0.1.0)";
 const DISCORD_MESSAGE_CHARACTERS = 1_900;
 const SUPPRESS_EMBEDS = 1 << 2;
 const MAX_RATE_LIMIT_RETRIES = 5;

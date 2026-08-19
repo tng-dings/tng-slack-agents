@@ -97,7 +97,7 @@ Rotation is a coordinated maintenance operation:
 
 1. Stop the AgentRunner or drain public events at the edge.
 2. Rotate the applicable Slack signing secret and/or Discord bot token through the approved administrator account.
-3. Rerun `Set-AgentRunnerSecrets.ps1` with the enabled ingress flags (`-SlackIngress events-api`, `-EnableDiscord`, and `-DiscordIngress http` as applicable), then restart AgentRunner.
+3. Review the ingress selections in `config.json`, rerun `Set-AgentRunnerSecrets.ps1` so it provisions the matching secrets, then restart AgentRunner. Legacy ingress flags may be supplied only as assertions that agree with the configuration.
 4. Validate `/healthz` and each enabled public route with one authorized request, one invalid signature, and one stale timestamp.
 5. Resume traffic and record the operator, time, test evidence, and next rotation date without recording either secret.
 

@@ -96,5 +96,4 @@ semantics.
 
 ## Related deferred work
 
-- [Repository consolidation](repository-consolidation.md)
 - [OpenCode runtime and workspace follow-up](opencode-runtime.md)

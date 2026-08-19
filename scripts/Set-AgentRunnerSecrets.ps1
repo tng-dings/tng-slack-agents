@@ -2,6 +2,7 @@
 param(
     [string]$GatewayDataDirectory = "$env:ProgramData\AgentRunner",
     [string]$WorkerDataDirectory = "$env:ProgramData\OpenCodeWorker",
+    [string]$ConfigPath = "",
     [string]$GatewayServiceIdentity = "NT SERVICE\AgentRunner",
     [string]$WorkerServiceIdentity = "NT SERVICE\OpenCodeServer",
     [ValidateSet("disabled", "socket", "events-api")]
@@ -14,7 +15,8 @@ param(
     [ValidateSet("opencode", "claude-code")]
     [string]$Executor = "opencode",
     [ValidateSet("ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN")]
-    [string]$ClaudeCredentialName = "ANTHROPIC_API_KEY"
+    [string]$ClaudeCredentialName = "ANTHROPIC_API_KEY",
+    [switch]$ValidateConfigurationOnly
 )
 
 $ErrorActionPreference = "Stop"
@@ -90,6 +92,101 @@ function Write-ProtectedSecrets([string]$Path, [hashtable]$Secrets, [string]$Rea
     }
     $acl.AddAccessRule((New-Object Security.AccessControl.FileSystemAccessRule($ReadIdentity, "Read", "Allow")))
     Set-Acl -Path $Path -AclObject $acl
+}
+
+if ([string]::IsNullOrWhiteSpace($ConfigPath)) {
+    $ConfigPath = Join-Path $GatewayDataDirectory "config.json"
+}
+if (-not (Test-Path -LiteralPath $ConfigPath -PathType Leaf)) {
+    throw "Configuration file '$ConfigPath' does not exist. Copy and review config.json before provisioning secrets."
+}
+
+try {
+    $provisioningConfig = Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
+}
+catch {
+    throw "Configuration file '$ConfigPath' is not valid JSON: $($_.Exception.Message)"
+}
+if ($provisioningConfig -isnot [PSCustomObject]) {
+    throw "config must be an object"
+}
+
+$configExecutorValue = $provisioningConfig.executor
+if ($null -ne $configExecutorValue -and $configExecutorValue -isnot [string]) {
+    throw "config.executor must be a string"
+}
+$configExecutor = if ($null -eq $configExecutorValue) {
+    "opencode"
+}
+else {
+    $configExecutorValue
+}
+if ($configExecutor -notin @("opencode", "claude-code")) {
+    throw 'config.executor must be "opencode" or "claude-code"'
+}
+if ($provisioningConfig.slack -isnot [PSCustomObject]) {
+    throw "config.slack must be an object"
+}
+$configSlackDisabled = $provisioningConfig.slack.enabled -is [bool] -and -not [bool]$provisioningConfig.slack.enabled
+$configSlackIngressValue = $provisioningConfig.slack.ingress
+if ($null -ne $configSlackIngressValue -and $configSlackIngressValue -isnot [string]) {
+    throw "config.slack.ingress must be a string"
+}
+$selectedSlackIngress = if ($null -eq $configSlackIngressValue) {
+    "socket"
+}
+else {
+    $configSlackIngressValue
+}
+if ($selectedSlackIngress -notin @("socket", "events-api")) {
+    throw 'config.slack.ingress must be "socket" or "events-api"'
+}
+$configSlackIngress = if ($configSlackDisabled) { "disabled" } else { $selectedSlackIngress }
+if ($null -ne $provisioningConfig.discord -and $provisioningConfig.discord -isnot [PSCustomObject]) {
+    throw "config.discord must be an object"
+}
+$configDiscordEnabled = (
+    $provisioningConfig.discord -is [PSCustomObject] -and
+    $provisioningConfig.discord.enabled -is [bool] -and
+    [bool]$provisioningConfig.discord.enabled
+)
+$configDiscordIngressValue = $provisioningConfig.discord.ingress
+if ($null -ne $configDiscordIngressValue -and $configDiscordIngressValue -isnot [string]) {
+    throw "config.discord.ingress must be a string"
+}
+$configDiscordIngress = if (
+    $null -eq $provisioningConfig.discord -or
+    $null -eq $configDiscordIngressValue
+) {
+    "gateway"
+}
+else {
+    $configDiscordIngressValue
+}
+if ($configDiscordIngress -notin @("gateway", "http")) {
+    throw 'config.discord.ingress must be "gateway" or "http"'
+}
+
+if ($PSBoundParameters.ContainsKey("Executor") -and $Executor -ne $configExecutor) {
+    throw "-Executor $Executor conflicts with config.executor $configExecutor"
+}
+if ($PSBoundParameters.ContainsKey("SlackIngress") -and $SlackIngress -ne $configSlackIngress) {
+    throw "-SlackIngress $SlackIngress conflicts with the Slack mode selected by config.json ($configSlackIngress)"
+}
+if ($PSBoundParameters.ContainsKey("EnableDiscord") -and ([bool]$EnableDiscord) -ne $configDiscordEnabled) {
+    throw "-EnableDiscord conflicts with config.discord.enabled ($configDiscordEnabled)"
+}
+if ($PSBoundParameters.ContainsKey("DiscordIngress") -and $DiscordIngress -ne $configDiscordIngress) {
+    throw "-DiscordIngress $DiscordIngress conflicts with config.discord.ingress $configDiscordIngress"
+}
+
+$Executor = $configExecutor
+$SlackIngress = $configSlackIngress
+$EnableDiscord = $configDiscordEnabled
+$DiscordIngress = $configDiscordIngress
+Write-Host "Provisioning from $ConfigPath (executor=$Executor, slack=$SlackIngress, discord=$(if ($EnableDiscord) { $DiscordIngress } else { 'disabled' }))."
+if ($ValidateConfigurationOnly) {
+    return
 }
 
 Assert-Identity $GatewayServiceIdentity

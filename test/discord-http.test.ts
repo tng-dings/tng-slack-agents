@@ -17,8 +17,8 @@ import {
   type ParsedDiscordCommand,
 } from "../src/discord.js";
 import { AgentRunner } from "../src/runner.js";
-import type { Executor, JobRecord, JobSubmission } from "../src/types.js";
-import { testAuthorizationPolicy, testConfig, testExecutor, waitFor } from "./helpers.js";
+import type { Executor, JobSubmission } from "../src/types.js";
+import { testAuthorizationPolicy, testConfig, testExecutor, testJob, waitFor } from "./helpers.js";
 
 const keyPair = generateKeyPairSync("ed25519");
 const publicKeyDer = keyPair.publicKey.export({ type: "spki", format: "der" }) as Buffer;
@@ -102,7 +102,7 @@ test("Discord HTTPS ingress verifies, commits, acknowledges promptly, and dedupl
     submit: async (submission) => {
       submissions.push(submission);
       await submissionGate;
-      return { job: {} as JobRecord, isNew: true };
+      return { job: testJob({ integration: "discord" }), isNew: true };
     },
   });
   const handler = new DiscordDurableInteractionHandler(database, adapter, 5);
@@ -249,7 +249,7 @@ test("Discord inbox recovers a sanitized interaction claimed before restart", as
   adapter.attachRunner({
     submit: async (submission) => {
       submissions.push(submission);
-      return { job: {} as JobRecord, isNew: true };
+      return { job: testJob({ integration: "discord" }), isNew: true };
     },
   });
   const handler = new DiscordDurableInteractionHandler(reopened, adapter, 5);
@@ -289,7 +289,7 @@ test("allowlisted Discord slash command completes through the generic runner and
   const executor: Executor = testExecutor(root, async () => ({
       output: "completed through discord",
       usage: { cost: 0, inputTokens: 1, outputTokens: 2 },
-    }), "discord-opencode-session");
+    }), "discord-provider-session");
   const runner = new AgentRunner(
     config,
     testAuthorizationPolicy(config),
