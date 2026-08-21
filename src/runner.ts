@@ -20,6 +20,12 @@ import { asRecord, errorMessage, errorMetadata, isRecord } from "./values.js";
 
 const emptyUsage = (): Usage => ({ cost: 0, inputTokens: 0, outputTokens: 0 });
 const reconciliationRetryMilliseconds = 1_000;
+/**
+ * Providers that stream token-sized deltas would otherwise rewrite the whole
+ * accumulated output once per delta. The persisted copy only has to survive a
+ * hard kill; every exit path through completeJob writes the final output.
+ */
+const outputPersistIntervalMilliseconds = 750;
 
 function contentMetadata(value: string): { characters: number; sha256: string } {
   return { characters: value.length, sha256: createHash("sha256").update(value).digest("hex") };
@@ -291,6 +297,7 @@ export class AgentRunner {
     let toolEventCount = 0;
     let preparingSession = false;
     let preparedTurnStarted = false;
+    let lastOutputPersistedAt = 0;
 
     try {
       await this.pendingDeliverySetup.get(job.id);
@@ -315,7 +322,11 @@ export class AgentRunner {
             }
             const accepted = delta.slice(0, remaining);
             output += accepted;
-            this.database.appendOutput(job.id, output);
+            const receivedAt = Date.now();
+            if (receivedAt - lastOutputPersistedAt >= outputPersistIntervalMilliseconds) {
+              lastOutputPersistedAt = receivedAt;
+              this.database.appendOutput(job.id, output);
+            }
             if (reporter) {
               try {
                 await reporter.append(accepted);
