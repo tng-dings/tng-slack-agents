@@ -109,6 +109,12 @@ export interface PreparedExecutionSession {
   providerId: string;
   providerSessionId: string;
   workingDirectory: string;
+  /**
+   * Whether the provider session has to be created rather than continued.
+   * Absent means create: starting a conversation over is recoverable, whereas
+   * continuing one that was never stored is not.
+   */
+  isNewProviderSession?: boolean;
 }
 
 export interface SessionPreparationCallbacks {

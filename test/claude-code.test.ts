@@ -3,12 +3,55 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { Query, SDKMessage, SDKUserMessage } from "@anthropic-ai/claude-agent-sdk";
+import type {
+  ListSessionsOptions,
+  Query,
+  SDKMessage,
+  SDKSessionInfo,
+  SDKUserMessage,
+} from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeCodeExecutor } from "../src/claude-code.js";
 import type { JobRecord, SessionRecord, Usage } from "../src/types.js";
 
 const sessionId = "11111111-1111-4111-8111-111111111111";
 const auditStub = { log: async () => undefined };
+
+/**
+ * Stands in for the transcripts the child would have written into a workspace.
+ * Tests push entries to simulate a turn that reached disk; deletions are applied
+ * so a caller cannot claim to erase a transcript it never touched.
+ */
+function transcriptStore(): {
+  entries: SDKSessionInfo[];
+  lookups: ListSessionsOptions[];
+  deleted: string[];
+  store: { list(options: ListSessionsOptions): Promise<SDKSessionInfo[]>; delete(id: string, options: { dir: string }): Promise<void> };
+} {
+  const entries: SDKSessionInfo[] = [];
+  const lookups: ListSessionsOptions[] = [];
+  const deleted: string[] = [];
+  return {
+    entries,
+    lookups,
+    deleted,
+    store: {
+      list: async (options: ListSessionsOptions) => {
+        lookups.push(options);
+        return [...entries];
+      },
+      delete: async (id: string) => {
+        deleted.push(id);
+        const index = entries.findIndex((entry) => entry.sessionId === id);
+        if (index < 0) throw new Error(`no transcript ${id}`);
+        entries.splice(index, 1);
+      },
+    },
+  };
+}
+
+function transcript(id: string, lastModified: number): SDKSessionInfo {
+  return { sessionId: id, summary: "", lastModified };
+}
 
 async function fixture(): Promise<{ root: string; repository: string; worktreeRoot: string }> {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-claude-code-"));
@@ -155,6 +198,7 @@ test("Claude Code streams input/output, maps tools and usage, and resumes the du
       close: () => { closeCount += 1; },
     } as unknown as Query;
   });
+  const transcripts = transcriptStore();
   const auditEvents: Array<{ eventType: string; payload: unknown }> = [];
   const executor = new ClaudeCodeExecutor(
     { workingRepository: repository, permissionMode: "acceptEdits" },
@@ -162,6 +206,7 @@ test("Claude Code streams input/output, maps tools and usage, and resumes the du
     { log: async (eventType: string, payload: unknown) => { auditEvents.push({ eventType, payload }); } },
     queryFactory,
     () => sessionId,
+    transcripts.store,
   );
   const preparedDirectories: string[] = [];
   const prepared = await executor.prepareSession(
@@ -179,6 +224,7 @@ test("Claude Code streams input/output, maps tools and usage, and resumes the du
     onUsage: (usage: Usage) => { usages.push(usage); },
   };
   const first = await executor.executeTurn(job(), prepared, callbacks, AbortSignal.timeout(2_000));
+  transcripts.entries.push(transcript(sessionId, 1));
   const resumed = await executor.prepareSession(
     job(),
     session({ providerId: "claude-code", providerSessionId: sessionId, workingDirectory: prepared.workingDirectory }),
@@ -206,6 +252,23 @@ test("Claude Code streams input/output, maps tools and usage, and resumes the du
   assert.equal(calls[1]?.options?.sessionId, undefined);
   assert.equal(calls[0]?.options?.includePartialMessages, true);
   assert.deepEqual(calls[0]?.options?.settingSources, ["user", "project", "local"]);
+  // Every workspace is a worktree of one repository, so sibling threads must
+  // never appear in a transcript lookup.
+  assert.equal(transcripts.lookups.every((options) => options.includeWorktrees === false), true);
+  assert.deepEqual(transcripts.lookups.map((options) => options.dir), [worktreeRoot, worktreeRoot]);
+  // The init message is the only record of which CLI and credential served the
+  // job, and it distinguishes a created session from a continued one.
+  assert.deepEqual(auditEvents.map((event) => event.eventType), [
+    "claude_code_session_started",
+    "claude_code_session_started",
+  ]);
+  assert.deepEqual(auditEvents[0]?.payload, {
+    version: "1.2.3",
+    model: "claude-opus-4",
+    apiKeySource: "ANTHROPIC_API_KEY",
+    resumed: false,
+  });
+  assert.equal((auditEvents[1]?.payload as { resumed: boolean }).resumed, true);
   assert.equal(calls[0]?.options?.env?.ANTHROPIC_API_KEY, environment.ANTHROPIC_API_KEY);
   assert.equal(calls[0]?.options?.env?.CLAUDE_CODE_OAUTH_TOKEN, environment.CLAUDE_CODE_OAUTH_TOKEN);
   assert.equal(calls[0]?.options?.env?.CLAUDE_CONFIG_DIR, environment.CLAUDE_CONFIG_DIR);
@@ -223,21 +286,63 @@ test("Claude Code streams input/output, maps tools and usage, and resumes the du
   assert.equal(calls[0]?.options?.env?.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, undefined);
   assert.equal(calls[0]?.options?.env?.SLACK_BOT_TOKEN, undefined);
   assert.equal(calls[0]?.options?.env?.DISCORD_BOT_TOKEN, undefined);
-  // The init message is the only record of which CLI and credential served the
-  // job, and it distinguishes a created session from a continued one.
-  assert.deepEqual(auditEvents.map((event) => event.eventType), [
-    "claude_code_session_started",
-    "claude_code_session_started",
-  ]);
-  assert.deepEqual(auditEvents[0]?.payload, {
-    version: "1.2.3",
-    model: "claude-opus-4",
-    apiKeySource: "ANTHROPIC_API_KEY",
-    resumed: false,
-  });
-  assert.equal((auditEvents[1]?.payload as { resumed: boolean }).resumed, true);
   assert.equal(closeCount, 2);
   await rm(root, { recursive: true, force: true });
+});
+
+test("Claude Code trusts the workspace transcript over the retired session record", async () => {
+  const olderSessionId = "22222222-2222-4222-8222-222222222222";
+  const mintedSessionId = "33333333-3333-4333-8333-333333333333";
+  const transcripts = transcriptStore();
+  const executor = new ClaudeCodeExecutor(
+    { workingRepository: ".", permissionMode: "acceptEdits" },
+    { prepare: async () => ".", cleanup: async () => undefined },
+    auditStub,
+    undefined,
+    () => mintedSessionId,
+    transcripts.store,
+  );
+  const prepare = (overrides: Partial<SessionRecord>) => executor.prepareSession(
+    job(),
+    session({ providerId: "claude-code", workingDirectory: ".", ...overrides }),
+    { onWorkingDirectory: () => undefined },
+    AbortSignal.timeout(2_000),
+  );
+
+  // A failed turn makes the runner retire the recorded ID, but the transcript
+  // survives, so the thread keeps its history instead of restarting.
+  transcripts.entries.push(transcript(olderSessionId, 10), transcript(sessionId, 20));
+  assert.equal((await prepare({ providerSessionId: null })).providerSessionId, sessionId);
+
+  // A hard kill can record an ID the child never wrote. Resuming it would fail
+  // for good, so an unknown ID starts a new session instead.
+  assert.equal((await prepare({ providerSessionId: mintedSessionId })).providerSessionId, mintedSessionId);
+
+  // An empty workspace has nothing to recover.
+  transcripts.entries.length = 0;
+  assert.equal((await prepare({ providerSessionId: null })).providerSessionId, mintedSessionId);
+});
+
+test("Claude Code retention erases every transcript the workspace holds", async () => {
+  const transcripts = transcriptStore();
+  const cleanedWorkspaces: string[] = [];
+  const executor = new ClaudeCodeExecutor(
+    { workingRepository: ".", permissionMode: "acceptEdits" },
+    { prepare: async () => ".", cleanup: async (directory: string) => { cleanedWorkspaces.push(directory); } },
+    auditStub,
+    undefined,
+    () => sessionId,
+    transcripts.store,
+  );
+  // A thread mints a new transcript every time a failed turn retires the last
+  // one, and the record is null whenever that failure was the most recent turn.
+  transcripts.entries.push(transcript("aaaaaaaa-1111-4111-8111-111111111111", 10), transcript(sessionId, 20));
+
+  await executor.cleanup(session({ providerId: "claude-code", providerSessionId: null, workingDirectory: "." }));
+
+  assert.deepEqual(transcripts.deleted, ["aaaaaaaa-1111-4111-8111-111111111111", sessionId]);
+  assert.deepEqual(transcripts.entries, []);
+  assert.deepEqual(cleanedWorkspaces, ["."]);
 });
 
 test("Claude Code refuses to rebind a previously used OpenCode thread", async () => {
@@ -287,6 +392,7 @@ test("Claude Code fails when the child downgrades the configured permission mode
     auditStub,
     queryFactory,
     () => sessionId,
+    transcriptStore().store,
   );
   const prepared = await executor.prepareSession(
     job(),
@@ -330,6 +436,7 @@ test("Claude Code cancellation aborts and closes the SDK query", async () => {
     auditStub,
     queryFactory,
     () => sessionId,
+    transcriptStore().store,
   );
   const prepared = await executor.prepareSession(
     job(),

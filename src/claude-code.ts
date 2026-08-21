@@ -1,12 +1,15 @@
 import { randomUUID } from "node:crypto";
 import {
   deleteSession,
+  listSessions,
   query,
+  type ListSessionsOptions,
   type Options,
   type PermissionMode,
   type Query,
   type SDKMessage,
   type SDKResultMessage,
+  type SDKSessionInfo,
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { isSupportedImageMime } from "./attachments.js";
@@ -32,6 +35,12 @@ const STDERR_TAIL_CHARACTERS = 4_000;
 type QueryFactory = (parameters: Parameters<typeof query>[0]) => Query;
 type ClaudeWorkspaceManager = Pick<WorkspaceManager, "prepare" | "cleanup">;
 type ClaudeAuditLogger = Pick<AuditLogger, "log">;
+
+/** The durable conversation record the child writes for a workspace. */
+interface TranscriptStore {
+  list(options: ListSessionsOptions): Promise<SDKSessionInfo[]>;
+  delete(sessionId: string, options: { dir: string }): Promise<void>;
+}
 
 function dataUrlPayload(dataUrl: string): string {
   const separator = dataUrl.indexOf(",");
@@ -142,8 +151,6 @@ function assertEffectivePermissionMode(message: SDKMessage, expected: string): v
 }
 
 export class ClaudeCodeExecutor implements Executor {
-  private readonly freshSessionIds = new Set<string>();
-
   private assertProvider(providerId: string, action: string): void {
     if (providerId === PROVIDER_ID) return;
     throw new ClaudeCodeError(`Cannot ${action} provider ${providerId} with Claude Code`, "CLAUDE_CODE_PROVIDER_MISMATCH");
@@ -155,7 +162,29 @@ export class ClaudeCodeExecutor implements Executor {
     private readonly audit: ClaudeAuditLogger,
     private readonly queryFactory: QueryFactory = query,
     private readonly sessionIdFactory: () => string = randomUUID,
+    private readonly transcripts: TranscriptStore = { list: listSessions, delete: deleteSession },
   ) {}
+
+  /**
+   * The transcript on disk, not the database column, is the durable record of a
+   * thread: the runner retires the recorded ID whenever a turn fails, and a
+   * hard kill can leave a recorded ID the child never wrote. Both cases are
+   * answered by asking the workspace what it actually holds.
+   *
+   * `includeWorktrees: false` matters. Every session workspace is a git
+   * worktree of one source repository, so the default would return sibling
+   * threads' transcripts and resume a conversation belonging to someone else.
+   */
+  private async resumableSessionId(
+    recordedSessionId: string | null,
+    workingDirectory: string,
+  ): Promise<string | undefined> {
+    const sessions = await this.transcripts.list({ dir: workingDirectory, includeWorktrees: false });
+    if (recordedSessionId) {
+      return sessions.some((entry) => entry.sessionId === recordedSessionId) ? recordedSessionId : undefined;
+    }
+    return [...sessions].sort((left, right) => right.lastModified - left.lastModified)[0]?.sessionId;
+  }
 
   /**
    * The init message is the only record of which CLI, model, and credential
@@ -181,12 +210,12 @@ export class ClaudeCodeExecutor implements Executor {
     }
     const workingDirectory = await this.workspaces.prepare(session.sessionKey, session.workingDirectory);
     await callbacks.onWorkingDirectory(workingDirectory);
-    const providerSessionId = session.providerSessionId ?? this.sessionIdFactory();
-    if (!session.providerSessionId) this.freshSessionIds.add(providerSessionId);
+    const resumable = await this.resumableSessionId(session.providerSessionId, workingDirectory);
     return {
       providerId: PROVIDER_ID,
-      providerSessionId,
+      providerSessionId: resumable ?? this.sessionIdFactory(),
       workingDirectory,
+      isNewProviderSession: resumable === undefined,
     };
   }
 
@@ -200,7 +229,7 @@ export class ClaudeCodeExecutor implements Executor {
     const controller = new AbortController();
     let stderrTail = "";
     const permissions = permissionOptions(this.config);
-    const freshSession = this.freshSessionIds.delete(session.providerSessionId);
+    const freshSession = session.isNewProviderSession ?? true;
     const options: Options = {
       abortController: controller,
       cwd: session.workingDirectory,
@@ -269,17 +298,24 @@ export class ClaudeCodeExecutor implements Executor {
     this.assertProvider(session.providerId, "reconcile");
     // Nothing to stop: SDK queries are child processes owned by this runner, so
     // an interrupted turn leaves no detached provider process behind. The runner
-    // then retires the recorded transcript ID.
+    // then retires the recorded transcript ID, and prepareSession recovers it
+    // from the workspace on the next turn.
   }
 
+  /**
+   * A thread accumulates one transcript per retirement cycle, and the recorded
+   * ID is null whenever its last turn failed, so the database column cannot say
+   * what retention has to erase. The workspace can: every transcript it holds
+   * belongs to this thread, and each one carries the prompts, file contents and
+   * tool output of a conversation that has now outlived its retention window.
+   */
   async cleanup(session: SessionRecord): Promise<void> {
     this.assertProvider(session.providerId, "clean up");
-    if (!session.workingDirectory) return;
-    if (session.providerSessionId) {
-      await deleteSession(session.providerSessionId, { dir: session.workingDirectory }).catch((error: unknown) => {
-        if (!/not found/i.test(errorMessage(error))) throw error;
-      });
+    const dir = session.workingDirectory;
+    if (!dir) return;
+    for (const entry of await this.transcripts.list({ dir, includeWorktrees: false })) {
+      await this.transcripts.delete(entry.sessionId, { dir });
     }
-    await this.workspaces.cleanup(session.workingDirectory);
+    await this.workspaces.cleanup(dir);
   }
 }
