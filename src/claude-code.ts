@@ -3,6 +3,7 @@ import {
   deleteSession,
   query,
   type Options,
+  type PermissionMode,
   type Query,
   type SDKMessage,
   type SDKResultMessage,
@@ -29,13 +30,6 @@ const PROVIDER_ID = "claude-code";
 const STDERR_TAIL_CHARACTERS = 4_000;
 type QueryFactory = (parameters: Parameters<typeof query>[0]) => Query;
 type ClaudeWorkspaceManager = Pick<WorkspaceManager, "prepare" | "cleanup">;
-
-function appendBounded(current: string, chunk: string): string {
-  const combined = current + chunk;
-  return combined.length <= STDERR_TAIL_CHARACTERS
-    ? combined
-    : combined.slice(combined.length - STDERR_TAIL_CHARACTERS);
-}
 
 function dataUrlPayload(dataUrl: string): string {
   const separator = dataUrl.indexOf(",");
@@ -119,10 +113,12 @@ async function emitToolEvents(message: SDKMessage, callbacks: ExecutionCallbacks
   }
 }
 
-function permissionOptions(config: ClaudeCodeConfig): Pick<
-  Options,
-  "permissionMode" | "allowDangerouslySkipPermissions" | "canUseTool"
-> {
+// Claude Code exits rather than skip permissions as root, so under root the
+// bypass becomes `default` plus an allow-all handler. Callers assert the child
+// reports back the mode returned here, so the two must not drift apart.
+function permissionOptions(
+  config: ClaudeCodeConfig,
+): Pick<Options, "allowDangerouslySkipPermissions" | "canUseTool"> & { permissionMode: PermissionMode } {
   if (config.permissionMode !== "bypassPermissions") return { permissionMode: config.permissionMode };
   if (process.getuid?.() === 0) {
     return {
@@ -133,11 +129,8 @@ function permissionOptions(config: ClaudeCodeConfig): Pick<
   return { permissionMode: "bypassPermissions", allowDangerouslySkipPermissions: true };
 }
 
-function assertEffectivePermissionMode(message: SDKMessage, config: ClaudeCodeConfig): void {
+function assertEffectivePermissionMode(message: SDKMessage, expected: string): void {
   if (message.type !== "system" || message.subtype !== "init") return;
-  const expected = config.permissionMode === "bypassPermissions" && process.getuid?.() === 0
-    ? "default"
-    : config.permissionMode;
   if (message.permissionMode !== expected) {
     throw new ClaudeCodeError(
       `Claude Code started with permission mode ${message.permissionMode}; expected ${expected}`,
@@ -148,6 +141,11 @@ function assertEffectivePermissionMode(message: SDKMessage, config: ClaudeCodeCo
 
 export class ClaudeCodeExecutor implements Executor {
   private readonly freshSessionIds = new Set<string>();
+
+  private assertProvider(providerId: string, action: string): void {
+    if (providerId === PROVIDER_ID) return;
+    throw new ClaudeCodeError(`Cannot ${action} provider ${providerId} with Claude Code`, "CLAUDE_CODE_PROVIDER_MISMATCH");
+  }
 
   constructor(
     private readonly config: ClaudeCodeConfig,
@@ -162,11 +160,8 @@ export class ClaudeCodeExecutor implements Executor {
     callbacks: SessionPreparationCallbacks,
     _signal: AbortSignal,
   ): Promise<PreparedExecutionSession> {
-    if (
-      session.providerId !== PROVIDER_ID &&
-      (session.providerSessionId !== null || session.executionGeneration > 0)
-    ) {
-      throw new ClaudeCodeError(`Cannot resume provider ${session.providerId} with Claude Code`, "CLAUDE_CODE_PROVIDER_MISMATCH");
+    if (session.providerSessionId !== null || session.executionGeneration > 0) {
+      this.assertProvider(session.providerId, "resume");
     }
     const workingDirectory = await this.workspaces.prepare(session.sessionKey, session.workingDirectory);
     await callbacks.onWorkingDirectory(workingDirectory);
@@ -185,11 +180,10 @@ export class ClaudeCodeExecutor implements Executor {
     callbacks: ExecutionCallbacks,
     signal: AbortSignal,
   ): Promise<ExecutionResult> {
-    if (session.providerId !== PROVIDER_ID) {
-      throw new ClaudeCodeError(`Cannot execute provider ${session.providerId} with Claude Code`, "CLAUDE_CODE_PROVIDER_MISMATCH");
-    }
+    this.assertProvider(session.providerId, "execute");
     const controller = new AbortController();
     let stderrTail = "";
+    const permissions = permissionOptions(this.config);
     const freshSession = this.freshSessionIds.delete(session.providerSessionId);
     const options: Options = {
       abortController: controller,
@@ -199,8 +193,8 @@ export class ClaudeCodeExecutor implements Executor {
       settingSources: ["user", "project", "local"],
       persistSession: true,
       env: claudeChildEnvironment(process.env),
-      stderr: (chunk) => { stderrTail = appendBounded(stderrTail, chunk); },
-      ...permissionOptions(this.config),
+      stderr: (chunk) => { stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_CHARACTERS); },
+      ...permissions,
       ...(freshSession ? { sessionId: session.providerSessionId } : { resume: session.providerSessionId }),
       ...(this.config.model ? { model: this.config.model } : {}),
       ...(this.config.executablePath ? { pathToClaudeCodeExecutable: this.config.executablePath } : {}),
@@ -219,7 +213,7 @@ export class ClaudeCodeExecutor implements Executor {
         if (message.session_id !== session.providerSessionId) {
           throw new ClaudeCodeError("Claude Code returned an unexpected session_id", "CLAUDE_CODE_SESSION_MISMATCH");
         }
-        assertEffectivePermissionMode(message, this.config);
+        assertEffectivePermissionMode(message, permissions.permissionMode);
         await emitTextDelta(message, callbacks);
         await emitToolEvents(message, callbacks);
         if (message.type === "result") {
@@ -255,18 +249,14 @@ export class ClaudeCodeExecutor implements Executor {
   }
 
   async reconcileSession(session: SessionRecord, _signal: AbortSignal): Promise<void> {
-    if (session.providerId !== PROVIDER_ID) {
-      throw new ClaudeCodeError(`Cannot reconcile provider ${session.providerId} with Claude Code`, "CLAUDE_CODE_PROVIDER_MISMATCH");
-    }
-    // SDK queries are child processes owned by this runner. After an in-process
-    // cancellation or a process restart there is no detached provider process
-    // to stop; the runner can safely retire the ambiguous transcript ID.
+    this.assertProvider(session.providerId, "reconcile");
+    // Nothing to stop: SDK queries are child processes owned by this runner, so
+    // an interrupted turn leaves no detached provider process behind. The runner
+    // then retires the recorded transcript ID.
   }
 
   async cleanup(session: SessionRecord): Promise<void> {
-    if (session.providerId !== PROVIDER_ID) {
-      throw new ClaudeCodeError(`Cannot clean up provider ${session.providerId} with Claude Code`, "CLAUDE_CODE_PROVIDER_MISMATCH");
-    }
+    this.assertProvider(session.providerId, "clean up");
     if (!session.workingDirectory) return;
     if (session.providerSessionId) {
       await deleteSession(session.providerSessionId, { dir: session.workingDirectory }).catch((error: unknown) => {
