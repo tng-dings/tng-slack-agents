@@ -236,7 +236,10 @@ export class ClaudeCodeExecutor implements Executor {
       cwd: session.workingDirectory,
       systemPrompt: { type: "preset", preset: "claude_code" },
       includePartialMessages: true,
-      settingSources: ["user", "project", "local"],
+      // "local" is withheld: the agent can write .claude/settings.local.json
+      // into its own workspace, and the next turn would load the hooks it left
+      // behind. "project" stays because CLAUDE.md needs it.
+      settingSources: ["user", "project"],
       persistSession: true,
       env: claudeChildEnvironment(process.env),
       stderr: (chunk) => { stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_CHARACTERS); },

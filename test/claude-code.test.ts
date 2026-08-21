@@ -298,7 +298,7 @@ test("Claude Code streams input/output, maps tools and usage, and resumes the du
   assert.equal(calls[1]?.options?.sessionId, undefined);
   assert.equal(calls[0]?.options?.includePartialMessages, true);
   assert.equal(calls[0]?.options?.maxBudgetUsd, 4.5);
-  assert.deepEqual(calls[0]?.options?.settingSources, ["user", "project", "local"]);
+  assert.deepEqual(calls[0]?.options?.settingSources, ["user", "project"]);
   // Every workspace is a worktree of one repository, so sibling threads must
   // never appear in a transcript lookup.
   assert.equal(transcripts.lookups.every((options) => options.includeWorktrees === false), true);
