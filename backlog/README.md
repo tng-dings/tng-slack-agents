@@ -22,6 +22,7 @@ Keep `npm run check`, `npm test`, `npm run build`, and
 ## Deferred product and maintenance work
 
 - [OpenCode runtime and workspace follow-up](opencode-runtime.md)
+- [Claude Code runtime follow-up](claude-code-runtime.md)
 
 Items in this section are not prerequisites for the first Windows-service
 validation unless that work uncovers a direct dependency.
