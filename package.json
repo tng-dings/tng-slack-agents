@@ -9,13 +9,13 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "dev": "tsx watch src/index.ts",
-    "doctor": "tsx src/cli/doctor.ts",
-    "discord:register": "tsx src/cli/register-discord.ts",
+    "dev": "tsx watch --env-file-if-exists=.env src/index.ts",
+    "doctor": "tsx --env-file-if-exists=.env src/cli/doctor.ts",
+    "discord:register": "tsx --env-file-if-exists=.env src/cli/register-discord.ts",
     "slack:manifest": "tsx src/cli/slack-manifest.ts",
     "start": "node dist/src/index.js",
     "status": "tsx src/cli/status.ts",
-    "smoke": "tsx src/cli/smoke.ts",
+    "smoke": "tsx --env-file-if-exists=.env src/cli/smoke.ts",
     "security:audit": "npm audit --audit-level=high",
     "test": "npm run build && node --test --test-isolation=none --test-concurrency=1 dist/test/claude-code.test.js dist/test/discord.test.js dist/test/discord-http.test.js dist/test/edge-hardening.test.js dist/test/opencode.test.js dist/test/reporter-routing.test.js dist/test/runner.test.js dist/test/security.test.js dist/test/slack.test.js dist/test/slack-http.test.js dist/test/workspace.test.js"
   },
