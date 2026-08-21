@@ -29,7 +29,7 @@ async function main(): Promise<void> {
         audit,
         config.limits.maxOutputCharacters + 64_000,
       )
-    : new ClaudeCodeExecutor(config.claudeCode, workspaces);
+    : new ClaudeCodeExecutor(config.claudeCode, workspaces, audit);
   const authorization = new IntegrationAuthorizationPolicy(config.integrations);
   const slack = config.slack.enabled ? new SlackGateway(config, secrets, database) : undefined;
   const discord = config.discord.enabled ? new DiscordGateway(config, secrets, database) : undefined;

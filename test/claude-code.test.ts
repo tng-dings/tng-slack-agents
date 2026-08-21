@@ -8,6 +8,7 @@ import { ClaudeCodeExecutor } from "../src/claude-code.js";
 import type { JobRecord, SessionRecord, Usage } from "../src/types.js";
 
 const sessionId = "11111111-1111-4111-8111-111111111111";
+const auditStub = { log: async () => undefined };
 
 async function fixture(): Promise<{ root: string; repository: string; worktreeRoot: string }> {
   const root = await mkdtemp(path.join(tmpdir(), "agent-runner-claude-code-"));
@@ -121,6 +122,15 @@ test("Claude Code streams input/output, maps tools and usage, and resumes the du
       assert.notEqual(typeof parameters.prompt, "string");
       for await (const input of parameters.prompt as AsyncIterable<SDKUserMessage>) inputs.push(input);
       yield {
+        type: "system",
+        subtype: "init",
+        permissionMode: "acceptEdits",
+        claude_code_version: "1.2.3",
+        model: "claude-opus-4",
+        apiKeySource: "ANTHROPIC_API_KEY",
+        session_id: sessionId,
+      } as unknown as SDKMessage;
+      yield {
         type: "stream_event",
         parent_tool_use_id: null,
         session_id: sessionId,
@@ -145,9 +155,11 @@ test("Claude Code streams input/output, maps tools and usage, and resumes the du
       close: () => { closeCount += 1; },
     } as unknown as Query;
   });
+  const auditEvents: Array<{ eventType: string; payload: unknown }> = [];
   const executor = new ClaudeCodeExecutor(
     { workingRepository: repository, permissionMode: "acceptEdits" },
     { prepare: async () => worktreeRoot, cleanup: async () => undefined },
+    { log: async (eventType: string, payload: unknown) => { auditEvents.push({ eventType, payload }); } },
     queryFactory,
     () => sessionId,
   );
@@ -211,6 +223,19 @@ test("Claude Code streams input/output, maps tools and usage, and resumes the du
   assert.equal(calls[0]?.options?.env?.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, undefined);
   assert.equal(calls[0]?.options?.env?.SLACK_BOT_TOKEN, undefined);
   assert.equal(calls[0]?.options?.env?.DISCORD_BOT_TOKEN, undefined);
+  // The init message is the only record of which CLI and credential served the
+  // job, and it distinguishes a created session from a continued one.
+  assert.deepEqual(auditEvents.map((event) => event.eventType), [
+    "claude_code_session_started",
+    "claude_code_session_started",
+  ]);
+  assert.deepEqual(auditEvents[0]?.payload, {
+    version: "1.2.3",
+    model: "claude-opus-4",
+    apiKeySource: "ANTHROPIC_API_KEY",
+    resumed: false,
+  });
+  assert.equal((auditEvents[1]?.payload as { resumed: boolean }).resumed, true);
   assert.equal(closeCount, 2);
   await rm(root, { recursive: true, force: true });
 });
@@ -226,6 +251,7 @@ test("Claude Code refuses to rebind a previously used OpenCode thread", async ()
       },
       cleanup: async () => undefined,
     },
+    auditStub,
   );
 
   await assert.rejects(
@@ -258,6 +284,7 @@ test("Claude Code fails when the child downgrades the configured permission mode
   const executor = new ClaudeCodeExecutor(
     { workingRepository: ".", permissionMode: "acceptEdits" },
     { prepare: async () => ".", cleanup: async () => undefined },
+    auditStub,
     queryFactory,
     () => sessionId,
   );
@@ -300,6 +327,7 @@ test("Claude Code cancellation aborts and closes the SDK query", async () => {
   const executor = new ClaudeCodeExecutor(
     { workingRepository: repository, permissionMode: "bypassPermissions" },
     { prepare: async () => worktreeRoot, cleanup: async () => undefined },
+    auditStub,
     queryFactory,
     () => sessionId,
   );

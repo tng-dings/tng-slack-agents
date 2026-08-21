@@ -10,6 +10,7 @@ import {
   type SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { isSupportedImageMime } from "./attachments.js";
+import type { AuditLogger } from "./audit.js";
 import type { ClaudeCodeConfig } from "./config.js";
 import { claudeChildEnvironment } from "./claude-environment.js";
 import { ClaudeCodeError } from "./errors.js";
@@ -23,13 +24,14 @@ import type {
   SessionRecord,
   Usage,
 } from "./types.js";
-import { errorMessage } from "./values.js";
+import { errorMessage, errorMetadata } from "./values.js";
 import type { WorkspaceManager } from "./workspace.js";
 
 const PROVIDER_ID = "claude-code";
 const STDERR_TAIL_CHARACTERS = 4_000;
 type QueryFactory = (parameters: Parameters<typeof query>[0]) => Query;
 type ClaudeWorkspaceManager = Pick<WorkspaceManager, "prepare" | "cleanup">;
+type ClaudeAuditLogger = Pick<AuditLogger, "log">;
 
 function dataUrlPayload(dataUrl: string): string {
   const separator = dataUrl.indexOf(",");
@@ -150,9 +152,23 @@ export class ClaudeCodeExecutor implements Executor {
   constructor(
     private readonly config: ClaudeCodeConfig,
     private readonly workspaces: ClaudeWorkspaceManager,
+    private readonly audit: ClaudeAuditLogger,
     private readonly queryFactory: QueryFactory = query,
     private readonly sessionIdFactory: () => string = randomUUID,
   ) {}
+
+  /**
+   * The init message is the only record of which CLI, model, and credential
+   * source actually served a job. Never worth failing that job over.
+   */
+  private async auditSessionStart(message: SDKMessage, job: JobRecord, resumed: boolean): Promise<void> {
+    if (message.type !== "system" || message.subtype !== "init") return;
+    await this.audit.log(
+      "claude_code_session_started",
+      { version: message.claude_code_version, model: message.model, apiKeySource: message.apiKeySource, resumed },
+      { jobId: job.id, userId: job.actorId, sessionKey: job.sessionKey },
+    ).catch((error: unknown) => console.error("Unable to record Claude Code session start", errorMetadata(error)));
+  }
 
   async prepareSession(
     _job: JobRecord,
@@ -214,6 +230,7 @@ export class ClaudeCodeExecutor implements Executor {
           throw new ClaudeCodeError("Claude Code returned an unexpected session_id", "CLAUDE_CODE_SESSION_MISMATCH");
         }
         assertEffectivePermissionMode(message, permissions.permissionMode);
+        await this.auditSessionStart(message, job, !freshSession);
         await emitTextDelta(message, callbacks);
         await emitToolEvents(message, callbacks);
         if (message.type === "result") {

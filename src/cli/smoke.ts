@@ -32,7 +32,7 @@ async function main(): Promise<void> {
         audit,
         config.limits.maxOutputCharacters + 64_000,
       )
-    : new ClaudeCodeExecutor(config.claudeCode, workspaces);
+    : new ClaudeCodeExecutor(config.claudeCode, workspaces, audit);
   const prompt = process.argv.slice(2).join(" ").trim() || defaultPrompt;
   const sourceEventId = `local-smoke:${randomUUID()}`;
   const job = database.insertJob(randomUUID(), {
