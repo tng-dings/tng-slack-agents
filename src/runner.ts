@@ -16,7 +16,7 @@ import type {
   SubmissionResult,
   Usage,
 } from "./types.js";
-import { asRecord, errorMetadata, isRecord } from "./values.js";
+import { asRecord, errorMessage, errorMetadata, isRecord } from "./values.js";
 
 const emptyUsage = (): Usage => ({ cost: 0, inputTokens: 0, outputTokens: 0 });
 const reconciliationRetryMilliseconds = 1_000;
@@ -510,7 +510,7 @@ export class AgentRunner {
       {
         phase,
         integration: job.integration,
-        error: error instanceof Error ? error.message : String(error),
+        error: errorMessage(error),
         ...errorMetadata(error),
       },
       this.context(job),

@@ -22,6 +22,7 @@ import type {
   SessionRecord,
   Usage,
 } from "./types.js";
+import { errorMessage } from "./values.js";
 import type { WorkspaceManager } from "./workspace.js";
 
 const PROVIDER_ID = "claude-code";
@@ -34,10 +35,6 @@ function appendBounded(current: string, chunk: string): string {
   return combined.length <= STDERR_TAIL_CHARACTERS
     ? combined
     : combined.slice(combined.length - STDERR_TAIL_CHARACTERS);
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }
 
 function dataUrlPayload(dataUrl: string): string {

@@ -1,6 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { personalizeSlackManifest } from "../slack/manifest.js";
+import { errorMessage } from "../values.js";
 
 /**
  * Prints a personalized copy of the reviewed Socket Mode manifest for pasting
@@ -21,6 +22,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  console.error(errorMessage(error));
   process.exitCode = 1;
 });

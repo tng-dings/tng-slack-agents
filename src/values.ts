@@ -12,6 +12,10 @@ export function errorType(value: unknown): string {
   return value instanceof Error ? value.name || "Error" : typeof value;
 }
 
+export function errorMessage(value: unknown): string {
+  return value instanceof Error ? value.message : String(value);
+}
+
 export function errorMetadata(value: unknown): { errorType: string; errorCode?: string } {
   return value instanceof RunnerError
     ? { errorType: errorType(value), errorCode: value.code }

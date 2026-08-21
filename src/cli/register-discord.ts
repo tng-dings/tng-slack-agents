@@ -1,6 +1,7 @@
 import { loadConfig } from "../config.js";
 import { DiscordApiClient } from "../discord/delivery.js";
 import { discordGuildCommand } from "../discord/registration.js";
+import { errorMessage } from "../values.js";
 
 async function main(): Promise<void> {
   const config = await loadConfig();
@@ -19,6 +20,6 @@ async function main(): Promise<void> {
 }
 
 main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.message : String(error));
+  console.error(errorMessage(error));
   process.exitCode = 1;
 });

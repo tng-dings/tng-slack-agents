@@ -4,6 +4,7 @@ import { promisify } from "node:util";
 import { loadConfig, loadSecrets } from "../config.js";
 import { DISCORD_USER_AGENT } from "../discord/delivery.js";
 import { unprivilegedChildEnvironment } from "../environment.js";
+import { errorMessage } from "../values.js";
 import { parseHealth } from "../opencode-protocol.js";
 import { assertApprovedOpenCodeVersion } from "../opencode-version.js";
 
@@ -158,7 +159,7 @@ async function main(): Promise<void> {
       console.log(`PASS ${check.name}: ${await check.run()}`);
     } catch (error) {
       failed = true;
-      console.error(`FAIL ${check.name}: ${error instanceof Error ? error.message : String(error)}`);
+      console.error(`FAIL ${check.name}: ${errorMessage(error)}`);
     }
   }
   if (failed) process.exitCode = 1;
