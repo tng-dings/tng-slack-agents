@@ -22,12 +22,7 @@ const auditStub = { log: async () => undefined };
  * Tests push entries to simulate a turn that reached disk; deletions are applied
  * so a caller cannot claim to erase a transcript it never touched.
  */
-function transcriptStore(): {
-  entries: SDKSessionInfo[];
-  lookups: ListSessionsOptions[];
-  deleted: string[];
-  store: { list(options: ListSessionsOptions): Promise<SDKSessionInfo[]>; delete(id: string, options: { dir: string }): Promise<void> };
-} {
+function transcriptStore() {
   const entries: SDKSessionInfo[] = [];
   const lookups: ListSessionsOptions[] = [];
   const deleted: string[] = [];

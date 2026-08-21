@@ -166,14 +166,11 @@ export class ClaudeCodeExecutor implements Executor {
   ) {}
 
   /**
-   * The transcript on disk, not the database column, is the durable record of a
-   * thread: the runner retires the recorded ID whenever a turn fails, and a
-   * hard kill can leave a recorded ID the child never wrote. Both cases are
-   * answered by asking the workspace what it actually holds.
-   *
-   * `includeWorktrees: false` matters. Every session workspace is a git
-   * worktree of one source repository, so the default would return sibling
-   * threads' transcripts and resume a conversation belonging to someone else.
+   * The transcript on disk is the durable record, not the recorded ID: the
+   * runner retires that ID whenever a turn fails, and a hard kill can leave one
+   * the child never wrote. `includeWorktrees: false` is load-bearing — every
+   * workspace is a worktree of one repository, so the SDK default would resume
+   * a sibling thread's conversation.
    */
   private async resumableSessionId(
     recordedSessionId: string | null,
@@ -181,15 +178,12 @@ export class ClaudeCodeExecutor implements Executor {
   ): Promise<string | undefined> {
     const sessions = await this.transcripts.list({ dir: workingDirectory, includeWorktrees: false });
     if (recordedSessionId) {
-      return sessions.some((entry) => entry.sessionId === recordedSessionId) ? recordedSessionId : undefined;
+      return sessions.find((entry) => entry.sessionId === recordedSessionId)?.sessionId;
     }
-    return [...sessions].sort((left, right) => right.lastModified - left.lastModified)[0]?.sessionId;
+    return sessions.sort((left, right) => right.lastModified - left.lastModified)[0]?.sessionId;
   }
 
-  /**
-   * The init message is the only record of which CLI, model, and credential
-   * source actually served a job. Never worth failing that job over.
-   */
+  /** Records which CLI, model and credential served a job. Never worth failing that job over. */
   private async auditSessionStart(message: SDKMessage, job: JobRecord, resumed: boolean): Promise<void> {
     if (message.type !== "system" || message.subtype !== "init") return;
     await this.audit.log(
@@ -313,18 +307,19 @@ export class ClaudeCodeExecutor implements Executor {
   }
 
   /**
-   * A thread accumulates one transcript per retirement cycle, and the recorded
-   * ID is null whenever its last turn failed, so the database column cannot say
-   * what retention has to erase. The workspace can: every transcript it holds
-   * belongs to this thread, and each one carries the prompts, file contents and
-   * tool output of a conversation that has now outlived its retention window.
+   * A thread accumulates one transcript per retirement cycle and the recorded
+   * ID is null whenever its last turn failed, so only the workspace can say
+   * what retention has to erase.
    */
   async cleanup(session: SessionRecord): Promise<void> {
     this.assertProvider(session.providerId, "clean up");
     const dir = session.workingDirectory;
     if (!dir) return;
     for (const entry of await this.transcripts.list({ dir, includeWorktrees: false })) {
-      await this.transcripts.delete(entry.sessionId, { dir });
+      // A transcript removed between the listing and the delete is already gone.
+      await this.transcripts.delete(entry.sessionId, { dir }).catch((error: unknown) => {
+        if (!/not found/i.test(errorMessage(error))) throw error;
+      });
     }
     await this.workspaces.cleanup(dir);
   }

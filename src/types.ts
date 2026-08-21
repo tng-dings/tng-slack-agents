@@ -109,11 +109,9 @@ export interface PreparedExecutionSession {
   providerId: string;
   providerSessionId: string;
   workingDirectory: string;
-  /**
-   * Whether the provider session has to be created rather than continued.
-   * Absent means create: starting a conversation over is recoverable, whereas
-   * continuing one that was never stored is not.
-   */
+  /** Whether the provider session has to be created rather than continued.
+   * Absent means create: restarting a conversation is recoverable, resuming one
+   * that was never stored is not. */
   isNewProviderSession?: boolean;
 }
 
@@ -130,11 +128,8 @@ export interface Executor {
     callbacks: SessionPreparationCallbacks,
     signal: AbortSignal,
   ): Promise<PreparedExecutionSession>;
-  /**
-   * `budgetUsd` is the spend still available to this job under the daily cap.
-   * Providers that can enforce it themselves stop cleanly instead of waiting
-   * for the runner to abort the turn mid-tool-call.
-   */
+  /** `budgetUsd` is the spend still available under the daily cap; providers that
+   * can enforce it stop cleanly instead of being aborted mid-tool-call. */
   executeTurn(
     job: JobRecord,
     session: PreparedExecutionSession,
