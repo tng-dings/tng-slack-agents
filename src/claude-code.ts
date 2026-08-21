@@ -16,7 +16,7 @@ import { isSupportedImageMime } from "./attachments.js";
 import type { AuditLogger } from "./audit.js";
 import type { ClaudeCodeConfig } from "./config.js";
 import { claudeChildEnvironment } from "./claude-environment.js";
-import { ClaudeCodeError } from "./errors.js";
+import { ClaudeCodeError, LimitError } from "./errors.js";
 import type {
   ExecutionCallbacks,
   ExecutionResult,
@@ -224,6 +224,7 @@ export class ClaudeCodeExecutor implements Executor {
     session: PreparedExecutionSession,
     callbacks: ExecutionCallbacks,
     signal: AbortSignal,
+    budgetUsd?: number,
   ): Promise<ExecutionResult> {
     this.assertProvider(session.providerId, "execute");
     const controller = new AbortController();
@@ -241,6 +242,7 @@ export class ClaudeCodeExecutor implements Executor {
       stderr: (chunk) => { stderrTail = (stderrTail + chunk).slice(-STDERR_TAIL_CHARACTERS); },
       ...permissions,
       ...(freshSession ? { sessionId: session.providerSessionId } : { resume: session.providerSessionId }),
+      ...(budgetUsd !== undefined ? { maxBudgetUsd: budgetUsd } : {}),
       ...(this.config.model ? { model: this.config.model } : {}),
       ...(this.config.executablePath ? { pathToClaudeCodeExecutable: this.config.executablePath } : {}),
     };
@@ -287,6 +289,11 @@ export class ClaudeCodeExecutor implements Executor {
 
     if (signal.aborted) throw signal.reason ?? new ClaudeCodeError("Claude Code execution was cancelled");
     if (!result) throw new ClaudeCodeError("Claude Code stream ended without a result", "CLAUDE_CODE_STREAM_ENDED");
+    // The SDK enforced the cap we handed it and stopped cleanly, so this is a
+    // budget refusal rather than a provider fault.
+    if (result.subtype === "error_max_budget_usd") {
+      throw new LimitError("Your daily agent budget was reached while this job was running.", "DAILY_BUDGET");
+    }
     if (result.is_error || result.subtype !== "success") {
       const details = result.subtype === "success" ? result.result : result.errors.join("\n");
       throw new ClaudeCodeError(details || `Claude Code result failed: ${result.subtype}`, "CLAUDE_CODE_PROVIDER_ERROR");

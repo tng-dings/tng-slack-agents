@@ -370,8 +370,13 @@ export class AgentRunner {
       preparingSession = false;
       preparedTurnStarted = true;
       this.activeProviderTurns.add(job.id);
-      const result = await this.executor.executeTurn(job, prepared, executionCallbacks, controller.signal)
-        .finally(() => this.activeProviderTurns.delete(job.id));
+      const result = await this.executor.executeTurn(
+        job,
+        prepared,
+        executionCallbacks,
+        controller.signal,
+        Math.max(0, this.config.limits.dailyCostCap - costBeforeJob),
+      ).finally(() => this.activeProviderTurns.delete(job.id));
       const resultOutput = result.output || output;
       if (resultOutput.length > this.config.limits.maxOutputCharacters) {
         output = resultOutput.slice(0, this.config.limits.maxOutputCharacters);

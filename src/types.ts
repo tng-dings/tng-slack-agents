@@ -130,11 +130,17 @@ export interface Executor {
     callbacks: SessionPreparationCallbacks,
     signal: AbortSignal,
   ): Promise<PreparedExecutionSession>;
+  /**
+   * `budgetUsd` is the spend still available to this job under the daily cap.
+   * Providers that can enforce it themselves stop cleanly instead of waiting
+   * for the runner to abort the turn mid-tool-call.
+   */
   executeTurn(
     job: JobRecord,
     session: PreparedExecutionSession,
     callbacks: ExecutionCallbacks,
     signal: AbortSignal,
+    budgetUsd?: number,
   ): Promise<ExecutionResult>;
 }
 

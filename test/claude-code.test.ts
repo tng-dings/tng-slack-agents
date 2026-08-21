@@ -11,6 +11,7 @@ import type {
   SDKUserMessage,
 } from "@anthropic-ai/claude-agent-sdk";
 import { ClaudeCodeExecutor } from "../src/claude-code.js";
+import { LimitError } from "../src/errors.js";
 import type { JobRecord, SessionRecord, Usage } from "../src/types.js";
 
 const sessionId = "11111111-1111-4111-8111-111111111111";
@@ -125,6 +126,51 @@ function resultMessage(output: string): SDKMessage {
   } as unknown as SDKMessage;
 }
 
+test("Claude Code reports an SDK-enforced budget stop as a budget limit", async () => {
+  const queryFactory = (() => {
+    const stream = async function* (): AsyncIterable<SDKMessage> {
+      yield {
+        ...(resultMessage("partial") as unknown as Record<string, unknown>),
+        subtype: "error_max_budget_usd",
+        is_error: true,
+        errors: ["max budget exceeded"],
+      } as unknown as SDKMessage;
+    };
+    return {
+      [Symbol.asyncIterator]: () => stream()[Symbol.asyncIterator](),
+      close: () => undefined,
+    } as unknown as Query;
+  });
+  const executor = new ClaudeCodeExecutor(
+    { workingRepository: ".", permissionMode: "acceptEdits" },
+    { prepare: async () => ".", cleanup: async () => undefined },
+    auditStub,
+    queryFactory,
+    () => sessionId,
+    transcriptStore().store,
+  );
+  const prepared = await executor.prepareSession(
+    job(),
+    session(),
+    { onWorkingDirectory: () => undefined },
+    AbortSignal.timeout(2_000),
+  );
+
+  await assert.rejects(
+    executor.executeTurn(
+      job(),
+      prepared,
+      { onText: () => undefined, onTool: () => undefined, onUsage: () => undefined },
+      AbortSignal.timeout(2_000),
+      0.25,
+    ),
+    // The user-facing failure has to name the budget, not a provider fault.
+    (error: unknown) => error instanceof LimitError
+      && error.code === "DAILY_BUDGET"
+      && /budget/i.test(error.message),
+  );
+});
+
 test("Claude Code streams input/output, maps tools and usage, and resumes the durable session", async (t) => {
   const environment = {
     ANTHROPIC_API_KEY: "anthropic-key",
@@ -223,7 +269,7 @@ test("Claude Code streams input/output, maps tools and usage, and resumes the du
     onTool: (event: unknown) => { tools.push(event); },
     onUsage: (usage: Usage) => { usages.push(usage); },
   };
-  const first = await executor.executeTurn(job(), prepared, callbacks, AbortSignal.timeout(2_000));
+  const first = await executor.executeTurn(job(), prepared, callbacks, AbortSignal.timeout(2_000), 4.5);
   transcripts.entries.push(transcript(sessionId, 1));
   const resumed = await executor.prepareSession(
     job(),
@@ -251,6 +297,7 @@ test("Claude Code streams input/output, maps tools and usage, and resumes the du
   assert.equal(calls[1]?.options?.resume, sessionId);
   assert.equal(calls[1]?.options?.sessionId, undefined);
   assert.equal(calls[0]?.options?.includePartialMessages, true);
+  assert.equal(calls[0]?.options?.maxBudgetUsd, 4.5);
   assert.deepEqual(calls[0]?.options?.settingSources, ["user", "project", "local"]);
   // Every workspace is a worktree of one repository, so sibling threads must
   // never appear in a transcript lookup.
